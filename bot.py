@@ -13,12 +13,11 @@ from telegram.ext import (
 from dotenv import load_dotenv
 import excel_handler
 
-load_dotenv()
+load_dotenv("/data/.env")  # cloud volume config
+load_dotenv()             # local .env fallback
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-logging.info("ALL ENV KEYS: %s", sorted(os.environ.keys()))
-logging.info("TOKEN found: %s", bool(TOKEN))
 PAGE_SIZE = 8
 CHAT_ID_FILE = os.path.join(os.path.dirname(__file__), "chat_id.txt")
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
