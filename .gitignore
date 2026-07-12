@@ -1,0 +1,7 @@
+.env
+budget.xlsx
+chat_id.txt
+*.log
+__pycache__/
+*.pyc
+.DS_Store
