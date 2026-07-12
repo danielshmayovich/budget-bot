@@ -17,6 +17,8 @@ load_dotenv()
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+logging.info("ENV KEYS: %s", [k for k in os.environ if "TOKEN" in k or "TELEGRAM" in k or "BOT" in k])
+logging.info("TOKEN found: %s", bool(TOKEN))
 PAGE_SIZE = 8
 CHAT_ID_FILE = os.path.join(os.path.dirname(__file__), "chat_id.txt")
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
