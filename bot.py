@@ -243,7 +243,7 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top3 = [c["name"] for c in active[:3]]
     lines.append(f"\n🎯 *לאן לשים דגש:* {', '.join(top3)}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -520,7 +520,7 @@ async def on_startup(app):
         await loop.run_in_executor(None, excel_handler.get_categories)
         logging.info("קטגוריות נטענו לזיכרון")
     except Exception as e:
-        logging.warning("טעינת קטגוריות נכשלה: %s", e)
+        logging.warning("טעינת קטגוריות נכשלה: %s", e, exc_info=True)
 
 
 def main():
