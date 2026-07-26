@@ -152,21 +152,26 @@ def find_categories_multi(query, cats=None, threshold=0.5, max_results=5):
 
 
 def _wb_save_safe(wb, path):
-    """Save workbook, working around the openpyxl to_tree bug.
+    """Save workbook, stripping charts that openpyxl can't round-trip.
 
-    Some xlsx files store defined names (named ranges) as plain strings
-    internally. openpyxl's serializer calls to_tree() on every defined name
-    and crashes with AttributeError if it finds a string instead of a
-    DefinedName object. Stripping defined_names before save is safe for a
-    budget file — they are range aliases only, not formula dependencies.
+    Legacy charts (converted from .xls) crash openpyxl serialization with
+    AttributeError: 'str' object has no attribute 'to_tree' deep in the
+    chart/series/chartspace code. The bot only reads/writes cell data so
+    charts are safe to drop on the cloud copy; the user's desktop original
+    is never touched.
     """
+    for ws in wb.worksheets:
+        if ws._charts:
+            logging.info("Stripping %d chart(s) from sheet %r before save", len(ws._charts), ws.title)
+            ws._charts = []
+
     try:
         wb.save(path)
     except AttributeError as e:
         if "to_tree" not in str(e):
             raise
         from openpyxl.workbook.defined_name import DefinedNameList
-        logging.warning("to_tree bug hit — stripping defined_names and retrying: %s", e)
+        logging.warning("to_tree on defined_names — stripping and retrying: %s", e)
         wb.defined_names = DefinedNameList()
         wb.save(path)
 
