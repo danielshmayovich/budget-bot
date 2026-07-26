@@ -151,6 +151,26 @@ def find_categories_multi(query, cats=None, threshold=0.5, max_results=5):
     return [(score, cat) for score, cat in scored[:max_results]]
 
 
+def _wb_save_safe(wb, path):
+    """Save workbook, working around the openpyxl to_tree bug.
+
+    Some xlsx files store defined names (named ranges) as plain strings
+    internally. openpyxl's serializer calls to_tree() on every defined name
+    and crashes with AttributeError if it finds a string instead of a
+    DefinedName object. Stripping defined_names before save is safe for a
+    budget file — they are range aliases only, not formula dependencies.
+    """
+    try:
+        wb.save(path)
+    except AttributeError as e:
+        if "to_tree" not in str(e):
+            raise
+        from openpyxl.workbook.defined_name import DefinedNameList
+        logging.warning("to_tree bug hit — stripping defined_names and retrying: %s", e)
+        wb.defined_names = DefinedNameList()
+        wb.save(path)
+
+
 def add_expense(row_idx, amount, sheet_name=None):
     if not sheet_name:
         sheet_name = current_sheet()
@@ -169,12 +189,13 @@ def add_expense(row_idx, amount, sheet_name=None):
     actual = _sum_entries(ws, row_idx)
     tmp_path = EXCEL_PATH + ".tmp"
     try:
-        wb.save(tmp_path)
+        _wb_save_safe(wb, tmp_path)
         os.replace(tmp_path, EXCEL_PATH)  # atomic: no partial-write corruption
     except PermissionError:
         wb.close()
         raise PermissionError("הקובץ נעול - סגור את Excel ונסה שוב")
     except Exception as e:
+        logging.error("שגיאה בשמירת קובץ Excel", exc_info=True)
         wb.close()
         try:
             os.unlink(tmp_path)
