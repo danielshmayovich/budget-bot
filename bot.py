@@ -299,6 +299,58 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_status(expenses, income, month), parse_mode="Markdown")
 
 
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnose Excel file: list sheet names and check expected sheets exist."""
+    import traceback
+    import openpyxl
+
+    excel_path = os.getenv("EXCEL_PATH", "")
+    lines = [f"📁 EXCEL_PATH: `{excel_path}`"]
+
+    if not excel_path:
+        lines.append("❌ EXCEL_PATH לא מוגדר")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if not os.path.exists(excel_path):
+        lines.append(f"❌ הקובץ לא קיים: `{excel_path}`")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    size_kb = os.path.getsize(excel_path) / 1024
+    lines.append(f"📦 גודל: {size_kb:.0f} KB")
+
+    try:
+        wb = openpyxl.load_workbook(excel_path, read_only=True)
+        sheet_names = wb.sheetnames
+        wb.close()
+        lines.append(f"\n✅ הקובץ נפתח בהצלחה")
+        lines.append(f"📋 גיליונות ({len(sheet_names)}):")
+        for s in sheet_names:
+            lines.append(f"  • `{repr(s)}`")
+
+        expected_index = "I N D E X "
+        if expected_index in sheet_names:
+            lines.append(f"\n✅ גיליון INDEX נמצא: `{repr(expected_index)}`")
+        else:
+            lines.append(f"\n❌ גיליון INDEX חסר! מחפש: `{repr(expected_index)}`")
+            idx_like = [s for s in sheet_names if "index" in s.lower() or "INDEX" in s]
+            if idx_like:
+                lines.append(f"   אולי: {idx_like}")
+
+        current = excel_handler.current_sheet()
+        if current in sheet_names:
+            lines.append(f"✅ גיליון חודש נוכחי נמצא: `{repr(current)}`")
+        else:
+            lines.append(f"❌ גיליון חודש נוכחי חסר! מחפש: `{repr(current)}`")
+
+    except Exception as e:
+        lines.append(f"\n❌ שגיאה בפתיחת הקובץ:")
+        lines.append(f"```\n{traceback.format_exc()}\n```")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     numbers = re.findall(r"\d+(?:\.\d+)?", text)
@@ -479,6 +531,7 @@ def main():
     app.add_handler(CommandHandler("status",    cmd_status))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CommandHandler("export",    cmd_export))
+    app.add_handler(CommandHandler("debug",     cmd_debug))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), cmd_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
