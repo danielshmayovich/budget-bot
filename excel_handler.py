@@ -167,13 +167,19 @@ def add_expense(row_idx, amount, sheet_name=None):
 
     ws.cell(row_idx, next_col, float(amount))
     actual = _sum_entries(ws, row_idx)
+    tmp_path = EXCEL_PATH + ".tmp"
     try:
-        wb.save(EXCEL_PATH)
+        wb.save(tmp_path)
+        os.replace(tmp_path, EXCEL_PATH)  # atomic: no partial-write corruption
     except PermissionError:
         wb.close()
         raise PermissionError("הקובץ נעול - סגור את Excel ונסה שוב")
     except Exception as e:
         wb.close()
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         raise IOError(f"שגיאה בשמירת הקובץ: {type(e).__name__} - {e}") from e
     wb.close()
 

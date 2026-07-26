@@ -262,9 +262,21 @@ async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ EXCEL_PATH לא מוגדר")
         return
 
+    tmp_path = excel_path + ".tmp"
     try:
         tg_file = await context.bot.get_file(doc.file_id)
-        await tg_file.download_to_drive(excel_path)
+        await tg_file.download_to_drive(tmp_path)
+
+        # Validate before replacing — catch corrupted uploads early
+        import openpyxl as _openpyxl
+        try:
+            _openpyxl.load_workbook(tmp_path, read_only=True).close()
+        except Exception as val_err:
+            os.unlink(tmp_path)
+            await update.message.reply_text(f"⚠️ הקובץ שנשלח לא תקין (xlsx פגום): {val_err}")
+            return
+
+        os.replace(tmp_path, excel_path)  # atomic swap — no partial-write corruption
         excel_handler._cat_cache.clear()
         size_kb = doc.file_size / 1024
         await update.message.reply_text(
@@ -272,6 +284,10 @@ async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"השתמש ב-/status לבדוק שהנתונים נכונים"
         )
     except Exception as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         await update.message.reply_text(f"⚠️ שגיאה בהעלאת הקובץ: {e}")
 
 
@@ -305,7 +321,19 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import openpyxl
 
     excel_path = os.getenv("EXCEL_PATH", "")
-    lines = [f"📁 EXCEL_PATH: `{excel_path}`"]
+    data_dir = os.path.dirname(excel_path) or "/data"
+    lines = [f"📁 EXCEL_PATH: {excel_path}"]
+
+    # List all files in /data to surface backups
+    try:
+        data_files = sorted(os.listdir(data_dir))
+        lines.append(f"\n📂 קבצים ב-{data_dir}:")
+        for f in data_files:
+            fp = os.path.join(data_dir, f)
+            sz = os.path.getsize(fp) / 1024
+            lines.append(f"  {f}  ({sz:.0f} KB)")
+    except Exception as dir_err:
+        lines.append(f"  (שגיאה בקריאת תיקייה: {dir_err})")
 
     if not excel_path:
         lines.append("❌ EXCEL_PATH לא מוגדר")
