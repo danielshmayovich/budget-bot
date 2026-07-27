@@ -315,6 +315,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_status(expenses, income, month), parse_mode="Markdown")
 
 
+async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    excel_path = os.getenv("EXCEL_PATH", "")
+    if not excel_path or not os.path.exists(excel_path):
+        await update.message.reply_text("⚠️ קובץ האקסל לא נמצא")
+        return
+    await update.message.reply_text("⏳ מגבה ל-Google Drive...")
+    import drive_backup
+    success, msg = drive_backup.backup_to_drive(excel_path)
+    await update.message.reply_text(msg)
+
+
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Diagnose Excel file: list sheet names and check expected sheets exist."""
     import traceback
@@ -559,6 +570,7 @@ def main():
     app.add_handler(CommandHandler("status",    cmd_status))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CommandHandler("export",    cmd_export))
+    app.add_handler(CommandHandler("backup",    cmd_backup))
     app.add_handler(CommandHandler("debug",     cmd_debug))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), cmd_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

@@ -154,26 +154,30 @@ def find_categories_multi(query, cats=None, threshold=0.5, max_results=5):
 def _wb_save_safe(wb, path):
     """Save workbook, stripping charts that openpyxl can't round-trip.
 
-    Legacy charts (converted from .xls) crash openpyxl serialization with
-    AttributeError: 'str' object has no attribute 'to_tree' deep in the
-    chart/series/chartspace code. The bot only reads/writes cell data so
-    charts are safe to drop on the cloud copy; the user's desktop original
-    is never touched.
+    Legacy charts crash openpyxl serialization: 'str' has no attribute 'to_tree'.
+    wb.worksheets misses ChartSheet objects; wb._sheets covers everything.
     """
-    for ws in wb.worksheets:
-        if ws._charts:
-            logging.info("Stripping %d chart(s) from sheet %r before save", len(ws._charts), ws.title)
+    for ws in wb._sheets:
+        n = len(ws._charts) if hasattr(ws, "_charts") else 0
+        if n:
+            logging.info("Stripping %d chart(s) from sheet %r", n, ws.title)
+        if hasattr(ws, "_charts"):
             ws._charts = []
+        if hasattr(ws, "_images"):
+            ws._images = []
 
     try:
         wb.save(path)
+        return
     except AttributeError as e:
         if "to_tree" not in str(e):
             raise
-        from openpyxl.workbook.defined_name import DefinedNameList
-        logging.warning("to_tree on defined_names — stripping and retrying: %s", e)
-        wb.defined_names = DefinedNameList()
-        wb.save(path)
+        logging.warning("to_tree after chart strip — full traceback:", exc_info=True)
+
+    from openpyxl.workbook.defined_name import DefinedNameList
+    wb.defined_names = DefinedNameList()
+    logging.warning("Also stripped defined_names — retrying save")
+    wb.save(path)
 
 
 def add_expense(row_idx, amount, sheet_name=None):
