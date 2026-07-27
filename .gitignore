@@ -5,3 +5,5 @@ chat_id.txt
 __pycache__/
 *.pyc
 .DS_Store
+token.json
+client_secret*.json
