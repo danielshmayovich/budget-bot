@@ -13,9 +13,25 @@ from telegram.ext import (
 from dotenv import load_dotenv
 import excel_handler
 
-load_dotenv("/data/.env")  # cloud volume config
-load_dotenv()             # local .env fallback
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+
+_WATCHED = [
+    "TELEGRAM_BOT_TOKEN", "EXCEL_PATH",
+    "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN", "GOOGLE_DRIVE_FOLDER_ID",
+]
+
+# Log what Railway actually injected into the process before we touch dotenv
+logging.info("ENV before dotenv: %s",
+             {k: ("SET" if k in os.environ else "MISSING") for k in _WATCHED})
+
+# load_dotenv never overrides existing os.environ values (override=False default),
+# so Railway-injected vars always win; /data/.env fills in only what's missing.
+load_dotenv("/data/.env")
+load_dotenv()
+
+logging.info("ENV after  dotenv: %s",
+             {k: ("SET" if os.getenv(k) else "MISSING") for k in _WATCHED})
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PAGE_SIZE = 8
