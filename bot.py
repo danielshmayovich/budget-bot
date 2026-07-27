@@ -320,6 +320,26 @@ async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not excel_path or not os.path.exists(excel_path):
         await update.message.reply_text("⚠️ קובץ האקסל לא נמצא")
         return
+
+    # Diagnostic: show which Drive vars are actually visible to the process
+    drive_vars = {
+        "GOOGLE_CLIENT_ID":     os.getenv("GOOGLE_CLIENT_ID"),
+        "GOOGLE_CLIENT_SECRET": os.getenv("GOOGLE_CLIENT_SECRET"),
+        "GOOGLE_REFRESH_TOKEN": os.getenv("GOOGLE_REFRESH_TOKEN"),
+        "GOOGLE_DRIVE_FOLDER_ID": os.getenv("GOOGLE_DRIVE_FOLDER_ID"),
+    }
+    missing = [k for k, v in drive_vars.items() if not v]
+    logging.info("Drive vars visible to process: %s",
+                 {k: ("SET" if v else "MISSING") for k, v in drive_vars.items()})
+
+    if missing:
+        await update.message.reply_text(
+            f"⚠️ משתני סביבה חסרים לבוט (לא מוגדרים ב-/data/.env):\n"
+            + "\n".join(f"  • {k}" for k in missing)
+            + "\n\nהוסף אותם ל-/data/.env ב-Railway Shell"
+        )
+        return
+
     await update.message.reply_text("⏳ מגבה ל-Google Drive...")
     import drive_backup
     success, msg = drive_backup.backup_to_drive(excel_path)
