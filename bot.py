@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import excel_handler
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # suppress HTTP logs that expose bot token
 
 _WATCHED = [
     "TELEGRAM_BOT_TOKEN", "EXCEL_PATH",
