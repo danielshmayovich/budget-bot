@@ -279,7 +279,7 @@ async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ EXCEL_PATH לא מוגדר")
         return
 
-    tmp_path = excel_path + ".tmp"
+    tmp_path = excel_path + ".upload.xlsx"  # must end in .xlsx so openpyxl accepts it
     try:
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(tmp_path)
