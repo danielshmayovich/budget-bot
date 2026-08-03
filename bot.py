@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import shutil
+import json
 from datetime import time as dtime, datetime
 from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -52,6 +53,45 @@ def load_chat_id():
         with open(CHAT_ID_FILE) as f:
             return int(f.read().strip())
     return None
+
+
+def _chat_ids_path() -> str:
+    ep = os.getenv("EXCEL_PATH", "")
+    base = os.path.dirname(ep) if ep else os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "chat_ids.json")
+
+
+def _load_chat_ids_data() -> dict:
+    path = _chat_ids_path()
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"ids": [], "names": {}}
+
+
+def register_chat_id(chat_id: int, name: str = ""):
+    data = _load_chat_ids_data()
+    if chat_id not in data["ids"]:
+        data["ids"].append(chat_id)
+    if name:
+        data.setdefault("names", {})[str(chat_id)] = name
+    try:
+        with open(_chat_ids_path(), "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logging.warning("Failed to save chat_ids: %s", e)
+
+
+def load_all_chat_ids() -> list:
+    return _load_chat_ids_data().get("ids", [])
+
+
+def get_user_name(chat_id: int) -> str:
+    data = _load_chat_ids_data()
+    return data.get("names", {}).get(str(chat_id), "")
 
 
 def fmt(n):
@@ -132,8 +172,12 @@ def make_month_keyboard(pay_type, row, amount):
 
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = load_chat_id()
-    if not chat_id:
+    chat_ids = load_all_chat_ids()
+    if not chat_ids:
+        fallback = load_chat_id()
+        if fallback:
+            chat_ids = [fallback]
+    if not chat_ids:
         return
     try:
         expenses, income, month = excel_handler.get_status()
@@ -142,11 +186,12 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
         return
     if not expenses and not income:
         return
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=format_status(expenses, income, month),
-        parse_mode="Markdown",
-    )
+    text = format_status(expenses, income, month)
+    for cid in chat_ids:
+        try:
+            await context.bot.send_message(chat_id=cid, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logging.warning("Daily report to %s failed: %s", cid, e)
 
 
 def make_cat_keyboard(cats, amount, page=0):
@@ -176,7 +221,10 @@ def make_cat_keyboard(cats, amount, page=0):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat_id(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    first_name = (update.effective_user.first_name or "") if update.effective_user else ""
+    save_chat_id(chat_id)
+    register_chat_id(chat_id, first_name)
     await update.message.reply_text(
         "שלום! אני בוט ניהול התקציב המשפחתי \U0001f4b0\n\n"
         "פקודות:\n"
@@ -544,27 +592,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet_name = excel_handler.MONTH_SHEETS[month_num]
         name       = context.user_data.pop("pending_name", f"שורה {row}")
         pay_label  = PAY_LABELS.get(pay_type, pay_type)
+        sender_id  = query.message.chat_id
 
-        # Respond immediately — don't make user wait for Excel write
+        await query.edit_message_text(f"⏳ שומר {fmt(amount)} ₪...")
+
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, excel_handler.add_expense, row, amount, sheet_name)
+        except Exception as exc:
+            logging.error("add_expense failed: %s", exc)
+            await query.edit_message_text(f"⚠️ שגיאה בשמירה לאקסל: {exc}")
+            return
+
         await query.edit_message_text(
             f"✅ נוספו *{fmt(amount)} ₪* לקטגוריית *{name}* ({sheet_name.strip()}) — {pay_label}",
             parse_mode="Markdown",
         )
 
-        # Write to Excel in background thread
-        chat_id = query.message.chat_id
-
-        async def _save():
-            try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, excel_handler.add_expense, row, amount, sheet_name
-                )
-            except Exception as exc:
-                logging.error("add_expense failed: %s", exc)
-                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ שגיאה בשמירה לאקסל: {exc}")
-
-        asyncio.create_task(_save())
+        # Forward notification to all other registered users
+        sender_name = get_user_name(sender_id) or "בן/בת זוג"
+        notif = (
+            f"📢 *{sender_name}* הוסיף/ה: *{fmt(amount)} ₪*"
+            f" ל-*{name}* ({sheet_name.strip()}) — {pay_label}"
+        )
+        for other_id in load_all_chat_ids():
+            if other_id != sender_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=other_id, text=notif, parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logging.warning("Forward notification to %s failed: %s", other_id, e)
 
     elif data.startswith("page:"):
         parts = data.split(":")
