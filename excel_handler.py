@@ -182,6 +182,31 @@ def _wb_save_safe(wb, path):
     wb.save(path)
 
 
+def set_budget(row_idx, amount, sheet_name=None):
+    if not sheet_name:
+        sheet_name = current_sheet()
+    wb = _load_wb(write=True)
+    ws = wb[sheet_name]
+    ws.cell(row_idx, COL_BUDGET, float(amount))
+    tmp_path = EXCEL_PATH + ".tmp"
+    try:
+        _wb_save_safe(wb, tmp_path)
+        os.replace(tmp_path, EXCEL_PATH)
+    except PermissionError:
+        wb.close()
+        raise PermissionError("הקובץ נעול - סגור את Excel ונסה שוב")
+    except Exception as e:
+        logging.error("שגיאה בשמירת תקציב", exc_info=True)
+        wb.close()
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise IOError(f"שגיאה בשמירת הקובץ: {type(e).__name__} - {e}") from e
+    wb.close()
+    _cat_cache.pop(sheet_name, None)
+
+
 def add_expense(row_idx, amount, sheet_name=None):
     if not sheet_name:
         sheet_name = current_sheet()
