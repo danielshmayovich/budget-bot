@@ -116,7 +116,20 @@ def format_status(expenses, income, month_name):
         lines.append("")
         lines.append("*הוצאות לפי קטגוריה:*")
         for c in sorted(expenses, key=lambda x: -x["actual"]):
-            lines.append(f"  • {c['name']}: {fmt(c['actual'])} ₪")
+            budget = c.get("budget", 0)
+            actual = c["actual"]
+            name   = c["name"]
+            if budget > 0:
+                remaining = budget - actual
+                pct = actual / budget
+                if remaining < 0:
+                    lines.append(f"  🔴 {name}: {fmt(actual)} / {fmt(budget)} ₪  ⚠️ +{fmt(abs(remaining))}")
+                elif pct >= 0.85:
+                    lines.append(f"  🟡 {name}: {fmt(actual)} / {fmt(budget)} ₪  ({fmt(remaining)} נותר)")
+                else:
+                    lines.append(f"  🟢 {name}: {fmt(actual)} / {fmt(budget)} ₪  ({fmt(remaining)} נותר)")
+            else:
+                lines.append(f"  ▪️ {name}: {fmt(actual)} ₪")
 
     return "\n".join(lines)
 
@@ -124,19 +137,38 @@ def format_status(expenses, income, month_name):
 def format_expense_result(name, amount, result, pay_type=None, month_name=None):
     pay_label = PAY_LABELS.get(pay_type, "") if pay_type else ""
     month_str = f" ({month_name.strip()})" if month_name else ""
-    line1 = f"✅ נוספו *{fmt(amount)} ₪* לקטגוריית *{name}*{month_str}"
+    budget    = result.get("budget", 0)
+    actual    = result.get("actual", 0)
+    remaining = result.get("remaining", 0)
+
+    if budget > 0:
+        pct = actual / budget
+        if remaining < 0:
+            status_icon = "🔴"
+        elif pct >= 0.85:
+            status_icon = "🟡"
+        else:
+            status_icon = "🟢"
+    else:
+        status_icon = "✅"
+
+    line1 = f"{status_icon} נוספו *{fmt(amount)} ₪* לקטגוריית *{name}*{month_str}"
     if pay_label:
         line1 += f" — {pay_label}"
     lines = [line1, ""]
-    if result["budget"] > 0:
-        lines.append(f"\U0001f4b0 תקציב: {fmt(result['budget'])} ₪")
-        lines.append(f"\U0001f4ca בוצע: {fmt(result['actual'])} ₪")
-        if result["remaining"] < 0:
-            lines.append(f"⚠️ חריגה של *{fmt(abs(result['remaining']))} ₪* מהתקציב")
+
+    if budget > 0:
+        pct_display = int(pct * 100)
+        lines.append(f"💰 תקציב: {fmt(budget)} ₪  |  📊 בוצע: {fmt(actual)} ₪  ({pct_display}%)")
+        if remaining < 0:
+            lines.append(f"⚠️ *חריגה של {fmt(abs(remaining))} ₪ מהתקציב!*")
+        elif pct >= 0.85:
+            lines.append(f"🟡 נותרו: *{fmt(remaining)} ₪* — מתקרב לתקציב")
         else:
-            lines.append(f"\U0001f7e2 נותרו *{fmt(result['remaining'])} ₪*")
+            lines.append(f"🟢 נותרו: *{fmt(remaining)} ₪*")
     else:
-        lines.append(f"\U0001f4ca סה\"כ בקטגוריה: {fmt(result['actual'])} ₪")
+        lines.append(f"📊 סה\"כ בקטגוריה: *{fmt(actual)} ₪*")
+
     return "\n".join(lines)
 
 
@@ -273,28 +305,34 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     overruns = []
     for c in active[:15]:
-        actual  = c["actual"]
-        budget  = c.get("budget", 0)
-        filled  = max(1, int((actual / max_val) * BAR_W))
-        bar     = "█" * filled + "░" * (BAR_W - filled)
-        name    = c["name"]
+        actual = c["actual"]
+        budget = c.get("budget", 0)
+        name   = c["name"]
 
-        if budget > 0 and actual > budget:
-            overrun = actual - budget
-            overruns.append((name, overrun, budget))
-            icon = "🔴"
-        elif budget > 0:
-            icon = "🟢"
+        if budget > 0:
+            pct    = actual / budget
+            filled = min(int(pct * BAR_W), BAR_W)
+            bar    = "█" * filled + "░" * (BAR_W - filled)
+            bar_label = f"{fmt(actual)} / {fmt(budget)} ₪  ({int(pct * 100)}%)"
+            if actual > budget:
+                icon = "🔴"
+                overruns.append((name, actual - budget, budget))
+            elif pct >= 0.85:
+                icon = "🟡"
+            else:
+                icon = "🟢"
         else:
-            icon = "▪️"
+            filled    = max(1, int((actual / max_val) * BAR_W))
+            bar       = "█" * filled + "░" * (BAR_W - filled)
+            bar_label = f"{fmt(actual)} ₪"
+            icon      = "▪️"
 
-        # Hebrew name on its own RTL line
         lines.append(f"{RLM}{icon} *{name}*")
-        # Numbers-only line — pure LTR, no Hebrew
-        lines.append(f"   {bar} {fmt(actual)} ₪")
-        # Overrun on separate RTL line
+        lines.append(f"   {bar} {bar_label}")
         if budget > 0 and actual > budget:
             lines.append(f"{RLM}   ⚠️ חריגה: +{fmt(actual - budget)} ₪")
+        elif budget > 0 and pct >= 0.85 and actual <= budget:
+            lines.append(f"{RLM}   🟡 נותר: {fmt(int(budget - actual))} ₪")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
 
@@ -598,22 +636,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, excel_handler.add_expense, row, amount, sheet_name)
+            result = await loop.run_in_executor(None, excel_handler.add_expense, row, amount, sheet_name)
         except Exception as exc:
             logging.error("add_expense failed: %s", exc)
             await query.edit_message_text(f"⚠️ שגיאה בשמירה לאקסל: {exc}")
             return
 
-        await query.edit_message_text(
-            f"✅ נוספו *{fmt(amount)} ₪* לקטגוריית *{name}* ({sheet_name.strip()}) — {pay_label}",
-            parse_mode="Markdown",
-        )
+        confirm_text = format_expense_result(name, amount, result, pay_type, sheet_name)
+        await query.edit_message_text(confirm_text, parse_mode="Markdown")
 
         # Forward notification to all other registered users
         sender_name = get_user_name(sender_id) or "בן/בת זוג"
+        budget    = result.get("budget", 0)
+        remaining = result.get("remaining", 0)
+        overrun_note = (
+            f"\n⚠️ *חריגה של {fmt(abs(remaining))} ₪ מהתקציב ב-{name}!*"
+            if budget > 0 and remaining < 0 else ""
+        )
         notif = (
             f"📢 *{sender_name}* הוסיף/ה: *{fmt(amount)} ₪*"
-            f" ל-*{name}* ({sheet_name.strip()}) — {pay_label}"
+            f" ל-*{name}* ({sheet_name.strip()}) — {pay_label}{overrun_note}"
         )
         for other_id in load_all_chat_ids():
             if other_id != sender_id:

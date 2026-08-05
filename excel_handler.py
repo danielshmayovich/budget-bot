@@ -57,7 +57,9 @@ def _sum_entries(ws, row):
 
 def _load_wb(write=False):
     try:
-        return openpyxl.load_workbook(EXCEL_PATH)
+        # data_only=True for reads: formula cells return their last-computed value
+        # (not the formula string). Write mode keeps formulas intact.
+        return openpyxl.load_workbook(EXCEL_PATH, data_only=not write)
     except Exception as e:
         raise IOError(
             f"לא ניתן לפתוח את קובץ ה-Excel - ייתכן שנשמר כרגע, נסה שוב ({type(e).__name__})"
@@ -196,6 +198,17 @@ def add_expense(row_idx, amount, sheet_name=None):
 
     ws.cell(row_idx, next_col, float(amount))
     actual = _sum_entries(ws, row_idx)
+
+    # Read budget with data_only=True so formula cells return their computed value
+    budget = 0
+    try:
+        wb_r = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
+        budget_val = wb_r[sheet_name].cell(row_idx, COL_BUDGET).value
+        wb_r.close()
+        budget = float(budget_val) if isinstance(budget_val, (int, float)) and budget_val > 0 else 0
+    except Exception:
+        pass
+    remaining = round(budget - actual, 2) if budget > 0 else 0
     tmp_path = EXCEL_PATH + ".tmp"
     try:
         _wb_save_safe(wb, tmp_path)
@@ -223,4 +236,4 @@ def add_expense(row_idx, amount, sheet_name=None):
         except Exception as e:
             logging.warning("Desktop sync failed: %s", e)
 
-    return {"budget": 0, "actual": actual, "remaining": 0}
+    return {"budget": budget, "actual": actual, "remaining": remaining}
