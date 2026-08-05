@@ -29,7 +29,7 @@ else:
     print(f"Using: {secret_file}")
 
 flow = InstalledAppFlow.from_client_secrets_file(secret_file, SCOPES)
-creds = flow.run_local_server(port=0)
+creds = flow.run_local_server(port=0, open_browser=False)
 
 out = {
     "client_id":     creds.client_id,
