@@ -180,6 +180,36 @@ def _wb_save_safe(wb, path):
     wb.save(path)
 
 
+def transfer_budget(from_row, to_row, amount, sheet_name=None):
+    """Move `amount` from from_row's budget target to to_row's (column D)."""
+    if not sheet_name:
+        sheet_name = current_sheet()
+    wb = _load_wb(write=True)
+    ws = wb[sheet_name]
+    from_val = ws.cell(from_row, COL_BUDGET).value
+    to_val   = ws.cell(to_row,   COL_BUDGET).value
+    from_bud = float(from_val) if isinstance(from_val, (int, float)) else 0.0
+    to_bud   = float(to_val)   if isinstance(to_val,   (int, float)) else 0.0
+    ws.cell(from_row, COL_BUDGET, max(0.0, from_bud - float(amount)))
+    ws.cell(to_row,   COL_BUDGET, to_bud + float(amount))
+    tmp_path = EXCEL_PATH + ".tmp"
+    try:
+        _wb_save_safe(wb, tmp_path)
+        os.replace(tmp_path, EXCEL_PATH)
+    except PermissionError:
+        wb.close()
+        raise
+    except Exception as e:
+        wb.close()
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise IOError(f"שגיאה בהעברת תקציב: {e}") from e
+    wb.close()
+    _cat_cache.pop(sheet_name, None)
+
+
 def set_budget(row_idx, amount, sheet_name=None):
     if not sheet_name:
         sheet_name = current_sheet()

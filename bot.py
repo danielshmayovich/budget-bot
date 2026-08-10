@@ -783,6 +783,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cancel_btn = InlineKeyboardButton("❌ ביטול", callback_data="cancel")
 
             if after > budget:
+                overrun = after - budget
+                # Find categories with budget surplus (underspent), top 3
+                surplus = sorted(
+                    [c for c in cats if c.get("budget", 0) > 0
+                     and c["actual"] < c["budget"] and c["row"] != row],
+                    key=lambda x: -(x["budget"] - x["actual"]),
+                )[:3]
+
+                kb_rows = []
+                if surplus:
+                    for sc in surplus:
+                        avail    = sc["budget"] - sc["actual"]
+                        transfer = min(overrun, avail)
+                        label    = f"💸 מ-{sc['name'][:14]} (עודף {fmt(avail)} ₪)"
+                        cb       = f"transferbud:{sc['row']}:{row}:{transfer}:{month_num}:{pay_type}:{amount}"
+                        kb_rows.append([InlineKeyboardButton(label, callback_data=cb)])
+
+                kb_rows.append([confirm_btn])
+                kb_rows.append([cancel_btn])
+
+                surplus_hint = (
+                    "\n\n💡 *קטגוריות עם עודף — לחץ להעברת תקציב:*"
+                    if surplus else ""
+                )
                 await query.edit_message_text(
                     f"🔴 *שים לב — חריגה מהתקציב!*\n\n"
                     f"קטגוריה: *{name}*  ({sheet_name.strip()})\n"
@@ -790,9 +814,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📊 בוצע עד כה:  {fmt(actual)} ₪\n"
                     f"➕ הוספה:        {fmt(amount)} ₪\n"
                     f"─────────────────\n"
-                    f"🔴 סה\"כ אחרי: *{fmt(after)} ₪*  (חריגה של *{fmt(after - budget)} ₪*)\n\n"
-                    f"להמשיך בכל זאת?",
-                    reply_markup=InlineKeyboardMarkup([[confirm_btn], [cancel_btn]]),
+                    f"🔴 סה\"כ אחרי: *{fmt(after)} ₪*  (חריגה של *{fmt(overrun)} ₪*)"
+                    f"{surplus_hint}",
+                    reply_markup=InlineKeyboardMarkup(kb_rows),
                     parse_mode="Markdown",
                 )
                 return
@@ -813,6 +837,72 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         await _do_add_expense(query, context, month_num, pay_type, row, amount, name, pay_label, sheet_name)
+
+    elif data.startswith("transferbud:"):
+        # transferbud:from_row:to_row:transfer_amt:month_num:pay_type:expense_amount
+        parts          = data.split(":")
+        from_row       = int(parts[1])
+        to_row         = int(parts[2])
+        transfer_amt   = float(parts[3])
+        month_num      = int(parts[4])
+        pay_type       = parts[5]
+        expense_amount = float(parts[6])
+        sheet_name     = excel_handler.MONTH_SHEETS[month_num]
+        pay_label      = PAY_LABELS.get(pay_type, pay_type)
+        sender_id      = query.message.chat_id
+
+        try:
+            cats      = excel_handler.get_categories(sheet_name)
+            from_cat  = next((c for c in cats if c["row"] == from_row), None)
+            to_cat    = next((c for c in cats if c["row"] == to_row),   None)
+            from_name = from_cat["name"] if from_cat else f"שורה {from_row}"
+            to_name   = to_cat["name"]   if to_cat   else f"שורה {to_row}"
+        except Exception:
+            from_name, to_name = f"שורה {from_row}", f"שורה {to_row}"
+
+        await query.edit_message_text(f"⏳ מעביר תקציב ושומר הוצאה...")
+
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None, excel_handler.transfer_budget, from_row, to_row, transfer_amt, sheet_name
+            )
+        except Exception as exc:
+            logging.error("transfer_budget failed: %s", exc)
+            await query.edit_message_text(f"⚠️ שגיאה בהעברת תקציב: {exc}")
+            return
+
+        try:
+            result = await loop.run_in_executor(
+                None, excel_handler.add_expense, to_row, expense_amount, sheet_name
+            )
+        except Exception as exc:
+            logging.error("add_expense after transfer failed: %s", exc)
+            await query.edit_message_text(
+                f"⚠️ תקציב הועבר אבל שגיאה בהוספת הוצאה: {exc}"
+            )
+            return
+
+        await query.edit_message_text(
+            f"✅ *בוצע*\n\n"
+            f"💸 הועבר *{fmt(transfer_amt)} ₪* מ-*{from_name}* ל-*{to_name}*\n"
+            f"➕ נוסף: *{fmt(expense_amount)} ₪* ל-*{to_name}*"
+            f" ({sheet_name.strip()}) — {pay_label}\n\n"
+            f"📊 סה\"כ: *{fmt(result['actual'])} ₪* / יעד *{fmt(result['budget'])} ₪*",
+            parse_mode="Markdown",
+        )
+
+        sender_name = get_user_name(sender_id) or "בן/בת זוג"
+        notif = (
+            f"📢 *{sender_name}* העביר/ה {fmt(transfer_amt)} ₪ מ-*{from_name}* ל-*{to_name}*"
+            f" והוסיף/ה *{fmt(expense_amount)} ₪* ({sheet_name.strip()}) — {pay_label}"
+        )
+        for other_id in load_all_chat_ids():
+            if other_id != sender_id:
+                try:
+                    await context.bot.send_message(chat_id=other_id, text=notif, parse_mode="Markdown")
+                except Exception as e:
+                    logging.warning("Forward to %s failed: %s", other_id, e)
 
     elif data.startswith("confirmexp:"):
         # User confirmed after seeing overrun / near-budget warning
