@@ -113,6 +113,24 @@ def format_status(expenses, income, month_name):
     ]
 
     if expenses:
+        budgeted  = [c for c in expenses if c.get("budget", 0) > 0]
+        if budgeted:
+            total_bud = sum(c["budget"] for c in budgeted)
+            total_act = sum(c["actual"] for c in budgeted)
+            overruns  = [c for c in budgeted if c["actual"] > c["budget"]]
+            near      = [c for c in budgeted if 0 < c["budget"] - c["actual"] < c["budget"] * 0.15]
+            ok_count  = len(budgeted) - len(overruns) - len(near)
+            pct_used  = int(total_act / total_bud * 100) if total_bud > 0 else 0
+            lines.append("")
+            lines.append("*📌 סיכום תקציב:*")
+            lines.append(f"   ניצול: *{fmt(total_act)} / {fmt(total_bud)} ₪*  ({pct_used}%)")
+            status_parts = []
+            if overruns:  status_parts.append(f"🔴 {len(overruns)} חריגות")
+            if near:      status_parts.append(f"🟡 {len(near)} קרוב לגבול")
+            if ok_count:  status_parts.append(f"🟢 {ok_count} בתקציב")
+            if status_parts:
+                lines.append("   " + "  |  ".join(status_parts))
+
         lines.append("")
         lines.append("*הוצאות לפי קטגוריה:*")
         for c in sorted(expenses, key=lambda x: -x["actual"]):
@@ -651,6 +669,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _do_add_expense(query, context, month_num, pay_type, row, amount, name, pay_label, sheet_name):
+    """Save an expense to Excel, confirm to sender, and forward to other users."""
+    sender_id = query.message.chat_id
+    await query.edit_message_text(f"⏳ שומר {fmt(amount)} ₪...")
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, excel_handler.add_expense, row, amount, sheet_name)
+    except Exception as exc:
+        logging.error("add_expense failed: %s", exc)
+        await query.edit_message_text(f"⚠️ שגיאה בשמירה לאקסל: {exc}")
+        return
+
+    await query.edit_message_text(
+        format_expense_result(name, amount, result, pay_type, sheet_name),
+        parse_mode="Markdown",
+    )
+
+    sender_name  = get_user_name(sender_id) or "בן/בת זוג"
+    budget       = result.get("budget", 0)
+    remaining    = result.get("remaining", 0)
+    overrun_note = (
+        f"\n⚠️ *חריגה של {fmt(abs(remaining))} ₪ מהתקציב ב-{name}!*"
+        if budget > 0 and remaining < 0 else ""
+    )
+    notif = (
+        f"📢 *{sender_name}* הוסיף/ה: *{fmt(amount)} ₪*"
+        f" ל-*{name}* ({sheet_name.strip()}) — {pay_label}{overrun_note}"
+    )
+    for other_id in load_all_chat_ids():
+        if other_id != sender_id:
+            try:
+                await context.bot.send_message(chat_id=other_id, text=notif, parse_mode="Markdown")
+            except Exception as e:
+                logging.warning("Forward notification to %s failed: %s", other_id, e)
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
@@ -698,7 +753,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data.startswith("month:"):
-        # month:month_num:pay_type:row:amount → add expense
+        # month:month_num:pay_type:row:amount → check budget, then add expense
         parts      = data.split(":")
         month_num  = int(parts[1])
         pay_type   = parts[2]
@@ -707,41 +762,74 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet_name = excel_handler.MONTH_SHEETS[month_num]
         name       = context.user_data.pop("pending_name", f"שורה {row}")
         pay_label  = PAY_LABELS.get(pay_type, pay_type)
-        sender_id  = query.message.chat_id
 
-        await query.edit_message_text(f"⏳ שומר {fmt(amount)} ₪...")
-
-        loop = asyncio.get_event_loop()
+        # Budget pre-check: warn if this expense pushes close to or over the target
         try:
-            result = await loop.run_in_executor(None, excel_handler.add_expense, row, amount, sheet_name)
-        except Exception as exc:
-            logging.error("add_expense failed: %s", exc)
-            await query.edit_message_text(f"⚠️ שגיאה בשמירה לאקסל: {exc}")
-            return
+            cats = excel_handler.get_categories(sheet_name)
+            cat  = next((c for c in cats if c["row"] == row), None)
+        except Exception:
+            cat = None
 
-        confirm_text = format_expense_result(name, amount, result, pay_type, sheet_name)
-        await query.edit_message_text(confirm_text, parse_mode="Markdown")
+        if cat and cat.get("budget", 0) > 0:
+            budget    = cat["budget"]
+            actual    = cat["actual"]
+            after     = actual + amount
+            pct_after = after / budget
 
-        # Forward notification to all other registered users
-        sender_name = get_user_name(sender_id) or "בן/בת זוג"
-        budget    = result.get("budget", 0)
-        remaining = result.get("remaining", 0)
-        overrun_note = (
-            f"\n⚠️ *חריגה של {fmt(abs(remaining))} ₪ מהתקציב ב-{name}!*"
-            if budget > 0 and remaining < 0 else ""
-        )
-        notif = (
-            f"📢 *{sender_name}* הוסיף/ה: *{fmt(amount)} ₪*"
-            f" ל-*{name}* ({sheet_name.strip()}) — {pay_label}{overrun_note}"
-        )
-        for other_id in load_all_chat_ids():
-            if other_id != sender_id:
-                try:
-                    await context.bot.send_message(
-                        chat_id=other_id, text=notif, parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    logging.warning("Forward notification to %s failed: %s", other_id, e)
+            confirm_btn = InlineKeyboardButton(
+                "✅ הוסף בכל זאת" if after > budget else "✅ הוסף",
+                callback_data=f"confirmexp:{month_num}:{pay_type}:{row}:{amount}",
+            )
+            cancel_btn = InlineKeyboardButton("❌ ביטול", callback_data="cancel")
+
+            if after > budget:
+                await query.edit_message_text(
+                    f"🔴 *שים לב — חריגה מהתקציב!*\n\n"
+                    f"קטגוריה: *{name}*  ({sheet_name.strip()})\n"
+                    f"💰 יעד:          {fmt(budget)} ₪\n"
+                    f"📊 בוצע עד כה:  {fmt(actual)} ₪\n"
+                    f"➕ הוספה:        {fmt(amount)} ₪\n"
+                    f"─────────────────\n"
+                    f"🔴 סה\"כ אחרי: *{fmt(after)} ₪*  (חריגה של *{fmt(after - budget)} ₪*)\n\n"
+                    f"להמשיך בכל זאת?",
+                    reply_markup=InlineKeyboardMarkup([[confirm_btn], [cancel_btn]]),
+                    parse_mode="Markdown",
+                )
+                return
+
+            if pct_after >= 0.75:
+                await query.edit_message_text(
+                    f"🟡 *שים לב — מתקרב לגבול התקציב*\n\n"
+                    f"קטגוריה: *{name}*  ({sheet_name.strip()})\n"
+                    f"💰 יעד:          {fmt(budget)} ₪\n"
+                    f"📊 בוצע עד כה:  {fmt(actual)} ₪\n"
+                    f"➕ הוספה:        {fmt(amount)} ₪\n"
+                    f"─────────────────\n"
+                    f"🟡 סה\"כ אחרי: *{fmt(after)} ₪*  (נותר *{fmt(budget - after)} ₪*)\n\n"
+                    f"להמשיך?",
+                    reply_markup=InlineKeyboardMarkup([[confirm_btn], [cancel_btn]]),
+                    parse_mode="Markdown",
+                )
+                return
+
+        await _do_add_expense(query, context, month_num, pay_type, row, amount, name, pay_label, sheet_name)
+
+    elif data.startswith("confirmexp:"):
+        # User confirmed after seeing overrun / near-budget warning
+        parts      = data.split(":")
+        month_num  = int(parts[1])
+        pay_type   = parts[2]
+        row        = int(parts[3])
+        amount     = float(parts[4])
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        pay_label  = PAY_LABELS.get(pay_type, pay_type)
+        try:
+            cats = excel_handler.get_categories(sheet_name)
+            cat  = next((c for c in cats if c["row"] == row), None)
+            name = cat["name"] if cat else f"שורה {row}"
+        except Exception:
+            name = f"שורה {row}"
+        await _do_add_expense(query, context, month_num, pay_type, row, amount, name, pay_label, sheet_name)
 
     elif data.startswith("setbud:"):
         row = int(data.split(":")[1])
