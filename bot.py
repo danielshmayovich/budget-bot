@@ -113,23 +113,47 @@ def format_status(expenses, income, month_name):
     ]
 
     if expenses:
-        budgeted  = [c for c in expenses if c.get("budget", 0) > 0]
+        budgeted = [c for c in expenses if c.get("budget", 0) > 0]
         if budgeted:
-            total_bud = sum(c["budget"] for c in budgeted)
-            total_act = sum(c["actual"] for c in budgeted)
-            overruns  = [c for c in budgeted if c["actual"] > c["budget"]]
-            near      = [c for c in budgeted if 0 < c["budget"] - c["actual"] < c["budget"] * 0.15]
-            ok_count  = len(budgeted) - len(overruns) - len(near)
-            pct_used  = int(total_act / total_bud * 100) if total_bud > 0 else 0
+            total_bud    = sum(c["budget"] for c in budgeted)
+            total_act    = sum(c["actual"] for c in budgeted)
+            overrun_list = sorted(
+                [(c, c["actual"] - c["budget"]) for c in budgeted if c["actual"] > c["budget"]],
+                key=lambda x: -x[1],
+            )
+            surplus_list = sorted(
+                [(c, c["budget"] - c["actual"]) for c in budgeted if c["budget"] > c["actual"]],
+                key=lambda x: -x[1],
+            )
+            total_overrun = sum(a for _, a in overrun_list)
+            total_surplus = sum(a for _, a in surplus_list)
+            pct_used      = int(total_act / total_bud * 100) if total_bud > 0 else 0
+
             lines.append("")
             lines.append("*📌 סיכום תקציב:*")
             lines.append(f"   ניצול: *{fmt(total_act)} / {fmt(total_bud)} ₪*  ({pct_used}%)")
-            status_parts = []
-            if overruns:  status_parts.append(f"🔴 {len(overruns)} חריגות")
-            if near:      status_parts.append(f"🟡 {len(near)} קרוב לגבול")
-            if ok_count:  status_parts.append(f"🟢 {ok_count} בתקציב")
-            if status_parts:
-                lines.append("   " + "  |  ".join(status_parts))
+
+            if overrun_list:
+                lines.append(f"\n🔴 *חריגות — {fmt(total_overrun)} ₪ סה\"כ:*")
+                for cat, amt in overrun_list:
+                    lines.append(f"   • {cat['name'][:28]}: *+{fmt(amt)} ₪*")
+
+            if surplus_list:
+                lines.append(f"\n💚 *עודפים זמינים — {fmt(total_surplus)} ₪:*")
+                for cat, amt in surplus_list[:5]:
+                    lines.append(f"   • {cat['name'][:28]}: {fmt(amt)} ₪")
+
+            if overrun_list and surplus_list:
+                coverable = min(total_overrun, total_surplus)
+                if coverable >= total_overrun:
+                    lines.append("\n✅ *ניתן לכסות את כל החריגות מהעודפים*")
+                else:
+                    lines.append(
+                        f"\n💡 ניתן לכסות *{fmt(coverable)} ₪* מתוך {fmt(total_overrun)} ₪"
+                        f"  (נשארת חריגה של *{fmt(total_overrun - coverable)} ₪*)"
+                    )
+            elif overrun_list:
+                lines.append(f"\n⚠️ *אין עודפים — חריגה של {fmt(total_overrun)} ₪*")
 
         lines.append("")
         lines.append("*הוצאות לפי קטגוריה:*")
@@ -475,7 +499,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not expenses and not income:
         await update.message.reply_text("לא נמצאו נתונים לחודש הנוכחי")
         return
-    await update.message.reply_text(format_status(expenses, income, month), parse_mode="Markdown")
+    budgeted  = [c for c in expenses if c.get("budget", 0) > 0]
+    overruns  = [c for c in budgeted if c["actual"] > c["budget"]]
+    surpluses = [c for c in budgeted if c["budget"] > c["actual"]]
+    kb = (
+        InlineKeyboardMarkup([[InlineKeyboardButton("⚖️ אזן תקציב", callback_data="rebalance")]])
+        if overruns and surpluses else None
+    )
+    await update.message.reply_text(
+        format_status(expenses, income, month), parse_mode="Markdown", reply_markup=kb
+    )
 
 
 async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -920,6 +953,108 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             name = f"שורה {row}"
         await _do_add_expense(query, context, month_num, pay_type, row, amount, name, pay_label, sheet_name)
+
+    elif data == "rebalance":
+        sheet_name = excel_handler.current_sheet()
+        try:
+            cats = excel_handler.get_categories(sheet_name)
+        except Exception as e:
+            await query.edit_message_text(f"⚠️ {e}")
+            return
+        budgeted = [c for c in cats if c.get("budget", 0) > 0]
+        overruns = sorted(
+            [c for c in budgeted if c["actual"] > c["budget"]],
+            key=lambda x: -(x["actual"] - x["budget"]),
+        )
+        if not overruns:
+            await query.edit_message_text("✅ *אין חריגות — התקציב מאוזן!*", parse_mode="Markdown")
+            return
+        ov     = overruns[0]
+        ov_amt = ov["actual"] - ov["budget"]
+        top_surplus = sorted(
+            [c for c in budgeted if c["budget"] > c["actual"] and c["row"] != ov["row"]],
+            key=lambda x: -(x["budget"] - x["actual"]),
+        )[:3]
+        if not top_surplus:
+            lines = [f"• {c['name'][:25]}: +{fmt(c['actual'] - c['budget'])} ₪" for c in overruns]
+            await query.edit_message_text(
+                f"🔴 *{len(overruns)} חריגות — אין עודפים להעברה*\n\n" + "\n".join(lines),
+                parse_mode="Markdown",
+            )
+            return
+        current_month = datetime.now().month
+        kb_rows = []
+        for sc in top_surplus:
+            avail    = sc["budget"] - sc["actual"]
+            transfer = min(ov_amt, avail)
+            label    = f"💸 מ-{sc['name'][:14]} ({fmt(avail)} ₪ עודף)"
+            cb       = f"budtransfer:{sc['row']}:{ov['row']}:{transfer}:{current_month}"
+            kb_rows.append([InlineKeyboardButton(label, callback_data=cb)])
+        kb_rows.append([InlineKeyboardButton("✓ סיים", callback_data="cancel")])
+        await query.edit_message_text(
+            f"⚖️ *איזון תקציב* — {len(overruns)} חריגות\n\n"
+            f"🔴 *{ov['name']}*\n"
+            f"   יעד: {fmt(ov['budget'])} ₪  |  בוצע: {fmt(ov['actual'])} ₪\n"
+            f"   חריגה: *+{fmt(ov_amt)} ₪*\n\n"
+            f"העבר תקציב מ:",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+            parse_mode="Markdown",
+        )
+
+    elif data.startswith("budtransfer:"):
+        parts      = data.split(":")
+        from_row   = int(parts[1])
+        to_row     = int(parts[2])
+        amount     = float(parts[3])
+        month_num  = int(parts[4])
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        sender_id  = query.message.chat_id
+        try:
+            cats      = excel_handler.get_categories(sheet_name)
+            from_name = next((c["name"] for c in cats if c["row"] == from_row), f"שורה {from_row}")
+            to_name   = next((c["name"] for c in cats if c["row"] == to_row),   f"שורה {to_row}")
+        except Exception:
+            from_name, to_name = f"שורה {from_row}", f"שורה {to_row}"
+        await query.edit_message_text("⏳ מעביר תקציב...")
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None, excel_handler.transfer_budget, from_row, to_row, amount, sheet_name
+            )
+        except Exception as exc:
+            await query.edit_message_text(f"⚠️ שגיאה: {exc}")
+            return
+        # Check remaining overruns
+        try:
+            cats_after   = excel_handler.get_categories(sheet_name)
+            bud_after    = [c for c in cats_after if c.get("budget", 0) > 0]
+            still_over   = [c for c in bud_after if c["actual"] > c["budget"]]
+            still_surplus = [c for c in bud_after if c["budget"] > c["actual"]]
+        except Exception:
+            still_over, still_surplus = [], []
+        kb_next = None
+        if still_over and still_surplus:
+            kb_next = InlineKeyboardMarkup([[
+                InlineKeyboardButton(f"⚖️ המשך — עוד {len(still_over)} חריגות", callback_data="rebalance"),
+                InlineKeyboardButton("✓ סיים", callback_data="cancel"),
+            ]])
+        await query.edit_message_text(
+            f"✅ *הועבר {fmt(amount)} ₪ מ-{from_name} ל-{to_name}*\n\n"
+            + (f"נותרו {len(still_over)} חריגות" if still_over else "🎉 כל החריגות טופלו!"),
+            reply_markup=kb_next,
+            parse_mode="Markdown",
+        )
+        sender_name = get_user_name(sender_id) or "בן/בת זוג"
+        notif = (
+            f"📢 *{sender_name}* העביר/ה *{fmt(amount)} ₪*"
+            f" מ-*{from_name}* ל-*{to_name}* (איזון תקציב)"
+        )
+        for other_id in load_all_chat_ids():
+            if other_id != sender_id:
+                try:
+                    await context.bot.send_message(chat_id=other_id, text=notif, parse_mode="Markdown")
+                except Exception as e:
+                    logging.warning("Forward to %s failed: %s", other_id, e)
 
     elif data.startswith("setbud:"):
         row = int(data.split(":")[1])
