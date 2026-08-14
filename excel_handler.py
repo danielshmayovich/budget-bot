@@ -180,6 +180,38 @@ def _wb_save_safe(wb, path):
     wb.save(path)
 
 
+def reset_month(sheet_name=None):
+    """Clear all expense/income entries (columns E-AI) while keeping budget column D."""
+    if not sheet_name:
+        sheet_name = current_sheet()
+    wb = _load_wb(write=True)
+    ws = wb[sheet_name]
+    cleared = 0
+    for row_range in [(EXPENSE_START_ROW, EXPENSE_END_ROW), (INCOME_START_ROW, CAT_END_ROW)]:
+        for r in range(row_range[0], row_range[1] + 1):
+            for c in range(COL_EXP_START, COL_EXP_END + 1):
+                if ws.cell(r, c).value is not None:
+                    ws.cell(r, c).value = None
+                    cleared += 1
+    tmp_path = EXCEL_PATH + ".tmp"
+    try:
+        _wb_save_safe(wb, tmp_path)
+        os.replace(tmp_path, EXCEL_PATH)
+    except PermissionError:
+        wb.close()
+        raise
+    except Exception as e:
+        wb.close()
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise IOError(f"שגיאה באיפוס: {e}") from e
+    wb.close()
+    _cat_cache.pop(sheet_name, None)
+    return cleared
+
+
 def transfer_budget(from_row, to_row, amount, sheet_name=None):
     """Move `amount` from from_row's budget target to to_row's (column D)."""
     if not sheet_name:

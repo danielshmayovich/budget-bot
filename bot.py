@@ -561,6 +561,29 @@ async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(header, reply_markup=kb, parse_mode="Markdown")
 
 
+async def cmd_resetmonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    current_month = datetime.now().month
+    months = excel_handler.MONTH_SHEETS
+    rows, row_btns = [], []
+    for num in range(1, 13):
+        label = months[num].strip()
+        if num == current_month:
+            label = f"• {label} •"
+        row_btns.append(InlineKeyboardButton(label, callback_data=f"resetmonth:{num}"))
+        if len(row_btns) == 3:
+            rows.append(row_btns); row_btns = []
+    if row_btns:
+        rows.append(row_btns)
+    rows.append([InlineKeyboardButton("❌ ביטול", callback_data="cancel")])
+    await update.message.reply_text(
+        "🗑️ *איפוס חודש*\n\n"
+        "בחר את החודש שרוצה לאפס:\n"
+        "_(יעדי התקציב יישמרו — רק ההוצאות ימחקו)_",
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Diagnose Excel file: list sheet names and check expected sheets exist."""
     import traceback
@@ -1073,6 +1096,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+    elif data.startswith("resetmonth:"):
+        month_num  = int(data.split(":")[1])
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        await query.edit_message_text(
+            f"⚠️ *אתה עומד לאפס את חודש {sheet_name.strip()}*\n\n"
+            f"• כל ההוצאות שנרשמו יימחקו\n"
+            f"• יעדי התקציב (עמודה D) יישמרו\n"
+            f"• *אין דרך חזרה!*\n\n"
+            f"בטוח שרוצה להמשיך?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑️ כן, אפס את החודש", callback_data=f"confirmreset:{month_num}")],
+                [InlineKeyboardButton("❌ ביטול", callback_data="cancel")],
+            ]),
+            parse_mode="Markdown",
+        )
+
+    elif data.startswith("confirmreset:"):
+        month_num  = int(data.split(":")[1])
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        await query.edit_message_text(f"⏳ מאפס את חודש {sheet_name.strip()}...")
+        loop = asyncio.get_event_loop()
+        try:
+            cleared = await loop.run_in_executor(None, excel_handler.reset_month, sheet_name)
+        except Exception as exc:
+            logging.error("reset_month failed: %s", exc)
+            await query.edit_message_text(f"⚠️ שגיאה באיפוס: {exc}")
+            return
+        await query.edit_message_text(
+            f"✅ *חודש {sheet_name.strip()} אופס*\n\n"
+            f"נמחקו {cleared} ערכים\n"
+            f"יעדי התקציב נשמרו",
+            parse_mode="Markdown",
+        )
+
     elif data.startswith("budpage:"):
         page = int(data.split(":")[1])
         try:
@@ -1152,8 +1209,9 @@ def main():
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CommandHandler("budget",    cmd_budget))
     app.add_handler(CommandHandler("export",    cmd_export))
-    app.add_handler(CommandHandler("backup",    cmd_backup))
-    app.add_handler(CommandHandler("debug",     cmd_debug))
+    app.add_handler(CommandHandler("backup",     cmd_backup))
+    app.add_handler(CommandHandler("resetmonth", cmd_resetmonth))
+    app.add_handler(CommandHandler("debug",      cmd_debug))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), cmd_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
