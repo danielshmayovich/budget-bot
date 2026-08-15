@@ -346,6 +346,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /status - דוח מצב חודשי\n"
         "• /dashboard - ויזואליזציה + ניתוח חריגות\n"
         "• /budget - עדכון יעדי תקציב לפי קטגוריה\n"
+        "• /undo - בטל את ההוצאה/העברה האחרונה\n"
         "• /export - הורד קובץ האקסל\n\n"
         "הוספת הוצאה:\n"
         "• שלח `קטגוריה סכום` (לדוגמה: `דלק 150`)\n"
@@ -738,9 +739,17 @@ async def _do_add_expense(query, context, month_num, pay_type, row, amount, name
         await query.edit_message_text(f"⚠️ שגיאה בשמירה לאקסל: {exc}")
         return
 
+    col = result.get("col")
+    undo_kb = (
+        InlineKeyboardMarkup([[
+            InlineKeyboardButton("↩️ בטל הוספה", callback_data=f"undoexp:{row}:{col}:{month_num}")
+        ]])
+        if col else None
+    )
     await query.edit_message_text(
         format_expense_result(name, amount, result, pay_type, sheet_name),
         parse_mode="Markdown",
+        reply_markup=undo_kb,
     )
 
     sender_name  = get_user_name(sender_id) or "בן/בת זוג"
@@ -921,7 +930,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(
-                None, excel_handler.transfer_budget, from_row, to_row, transfer_amt, sheet_name
+                None, excel_handler.transfer_budget,
+                from_row, to_row, transfer_amt, sheet_name, from_name, to_name
             )
         except Exception as exc:
             logging.error("transfer_budget failed: %s", exc)
@@ -1042,7 +1052,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(
-                None, excel_handler.transfer_budget, from_row, to_row, amount, sheet_name
+                None, excel_handler.transfer_budget,
+                from_row, to_row, amount, sheet_name, from_name, to_name
             )
         except Exception as exc:
             await query.edit_message_text(f"⚠️ שגיאה: {exc}")
@@ -1130,6 +1141,94 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
+    elif data.startswith("undoexp:"):
+        # undoexp:row:col:month_num — undo the specific expense cell written
+        parts      = data.split(":")
+        row        = int(parts[1])
+        col        = int(parts[2])
+        month_num  = int(parts[3])
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        sender_id  = query.message.chat_id
+        loop = asyncio.get_event_loop()
+        try:
+            removed = await loop.run_in_executor(
+                None, excel_handler.undo_expense, row, col, sheet_name
+            )
+        except Exception as exc:
+            logging.error("undo_expense failed: %s", exc)
+            await query.edit_message_text(f"⚠️ שגיאה בביטול: {exc}")
+            return
+        await query.edit_message_text(
+            f"↩️ *בוטל* — {fmt(removed)} ₪ הוסרו ({sheet_name.strip()})",
+            parse_mode="Markdown",
+        )
+        sender_name = get_user_name(sender_id) or "בן/בת זוג"
+        notif = f"↩️ *{sender_name}* ביטל/ה הוספת *{fmt(removed)} ₪* ({sheet_name.strip()})"
+        for other_id in load_all_chat_ids():
+            if other_id != sender_id:
+                try:
+                    await context.bot.send_message(chat_id=other_id, text=notif, parse_mode="Markdown")
+                except Exception as e:
+                    logging.warning("Forward undo notif to %s failed: %s", other_id, e)
+
+    elif data == "executeundo":
+        action = excel_handler.load_last_action()
+        if not action:
+            await query.edit_message_text("אין פעולה לביטול")
+            return
+        sender_id = query.message.chat_id
+        loop = asyncio.get_event_loop()
+        atype = action.get("type")
+        amount = action.get("amount", 0)
+        sheet_name = action.get("sheet_name", excel_handler.current_sheet())
+        if atype == "expense":
+            try:
+                removed = await loop.run_in_executor(
+                    None, excel_handler.undo_expense,
+                    action["row"], action["col"], sheet_name
+                )
+            except Exception as exc:
+                await query.edit_message_text(f"⚠️ שגיאה: {exc}")
+                return
+            await query.edit_message_text(
+                f"✅ *בוטל* — {fmt(removed)} ₪ הוסרו ({sheet_name.strip()})",
+                parse_mode="Markdown",
+            )
+            sender_name = get_user_name(sender_id) or "בן/בת זוג"
+            notif = f"↩️ *{sender_name}* ביטל/ה הוספת *{fmt(removed)} ₪* ({sheet_name.strip()})"
+        elif atype == "budget_transfer":
+            from_row = action["from_row"]
+            to_row   = action["to_row"]
+            from_n   = action.get("from_name", f"שורה {from_row}")
+            to_n     = action.get("to_name",   f"שורה {to_row}")
+            try:
+                await loop.run_in_executor(
+                    None, excel_handler.transfer_budget,
+                    to_row, from_row, amount, sheet_name, to_n, from_n
+                )
+                excel_handler._save_last_action(None)
+            except Exception as exc:
+                await query.edit_message_text(f"⚠️ שגיאה: {exc}")
+                return
+            await query.edit_message_text(
+                f"✅ *בוטלה ההעברה* — {fmt(amount)} ₪ הוחזרו\nמ-*{to_n}* ל-*{from_n}*",
+                parse_mode="Markdown",
+            )
+            sender_name = get_user_name(sender_id) or "בן/בת זוג"
+            notif = (
+                f"↩️ *{sender_name}* ביטל/ה העברת *{fmt(amount)} ₪*"
+                f" מ-*{from_n}* ל-*{to_n}*"
+            )
+        else:
+            await query.edit_message_text("לא ניתן לבטל פעולה זו")
+            return
+        for other_id in load_all_chat_ids():
+            if other_id != sender_id:
+                try:
+                    await context.bot.send_message(chat_id=other_id, text=notif, parse_mode="Markdown")
+                except Exception as e:
+                    logging.warning("Forward undo notif to %s failed: %s", other_id, e)
+
     elif data.startswith("budpage:"):
         page = int(data.split(":")[1])
         try:
@@ -1178,6 +1277,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(kb)
 
 
+async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the last recorded action and offer to undo it."""
+    action = excel_handler.load_last_action()
+    if not action:
+        await update.message.reply_text("אין פעולה לביטול")
+        return
+    atype = action.get("type")
+    amount = action.get("amount", 0)
+    if atype == "expense":
+        sheet = action.get("sheet_name", "").strip()
+        desc = f"הוספת *{fmt(amount)} ₪* בחודש {sheet}"
+    elif atype == "budget_transfer":
+        from_n = action.get("from_name") or f"שורה {action.get('from_row')}"
+        to_n   = action.get("to_name")   or f"שורה {action.get('to_row')}"
+        desc = f"העברת *{fmt(amount)} ₪* מ-*{from_n}* ל-*{to_n}*"
+    else:
+        desc = "פעולה לא ידועה"
+    await update.message.reply_text(
+        f"↩️ *פעולה אחרונה:*\n{desc}\n\nלבטל?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ כן, בטל", callback_data="executeundo")],
+            [InlineKeyboardButton("❌ השאר", callback_data="cancel")],
+        ]),
+        parse_mode="Markdown",
+    )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error("Exception in handler: %s", context.error, exc_info=context.error)
 
@@ -1204,13 +1330,14 @@ def main():
     if not TOKEN:
         raise RuntimeError("חסר TELEGRAM_BOT_TOKEN ב-.env")
     app = Application.builder().token(TOKEN).post_init(on_startup).build()
-    app.add_handler(CommandHandler("start",     cmd_start))
-    app.add_handler(CommandHandler("status",    cmd_status))
-    app.add_handler(CommandHandler("dashboard", cmd_dashboard))
-    app.add_handler(CommandHandler("budget",    cmd_budget))
-    app.add_handler(CommandHandler("export",    cmd_export))
+    app.add_handler(CommandHandler("start",      cmd_start))
+    app.add_handler(CommandHandler("status",     cmd_status))
+    app.add_handler(CommandHandler("dashboard",  cmd_dashboard))
+    app.add_handler(CommandHandler("budget",     cmd_budget))
+    app.add_handler(CommandHandler("export",     cmd_export))
     app.add_handler(CommandHandler("backup",     cmd_backup))
     app.add_handler(CommandHandler("resetmonth", cmd_resetmonth))
+    app.add_handler(CommandHandler("undo",       cmd_undo))
     app.add_handler(CommandHandler("debug",      cmd_debug))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), cmd_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

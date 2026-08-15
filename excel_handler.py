@@ -3,6 +3,7 @@ import re
 import time
 import shutil
 import logging
+import json
 from datetime import datetime
 from difflib import SequenceMatcher
 import openpyxl
@@ -36,6 +37,36 @@ CACHE_TTL = 120  # seconds
 
 def current_sheet():
     return MONTH_SHEETS[datetime.now().month]
+
+
+def _last_action_path():
+    ep = os.getenv("EXCEL_PATH", "")
+    base = os.path.dirname(ep) if ep else os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "last_action.json")
+
+
+def _save_last_action(action):
+    try:
+        path = _last_action_path()
+        if action is None:
+            if os.path.exists(path):
+                os.unlink(path)
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(action, f, ensure_ascii=False)
+    except Exception as e:
+        logging.warning("Failed to save last action: %s", e)
+
+
+def load_last_action():
+    try:
+        path = _last_action_path()
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
 
 
 def _parse_name(cell_val, idx_ws):
@@ -212,7 +243,7 @@ def reset_month(sheet_name=None):
     return cleared
 
 
-def transfer_budget(from_row, to_row, amount, sheet_name=None):
+def transfer_budget(from_row, to_row, amount, sheet_name=None, from_name="", to_name=""):
     """Move `amount` from from_row's budget target to to_row's (column D)."""
     if not sheet_name:
         sheet_name = current_sheet()
@@ -240,6 +271,43 @@ def transfer_budget(from_row, to_row, amount, sheet_name=None):
         raise IOError(f"שגיאה בהעברת תקציב: {e}") from e
     wb.close()
     _cat_cache.pop(sheet_name, None)
+    _save_last_action({
+        "type": "budget_transfer",
+        "from_row": from_row,
+        "to_row": to_row,
+        "amount": float(amount),
+        "sheet_name": sheet_name,
+        "from_name": from_name,
+        "to_name": to_name,
+    })
+
+
+def undo_expense(row_idx, col, sheet_name=None):
+    """Clear a specific expense cell (for undo). Returns the removed amount."""
+    if not sheet_name:
+        sheet_name = current_sheet()
+    wb = _load_wb(write=True)
+    ws = wb[sheet_name]
+    amount = ws.cell(row_idx, col).value
+    ws.cell(row_idx, col).value = None
+    tmp_path = EXCEL_PATH + ".tmp"
+    try:
+        _wb_save_safe(wb, tmp_path)
+        os.replace(tmp_path, EXCEL_PATH)
+    except PermissionError:
+        wb.close()
+        raise PermissionError("הקובץ נעול - סגור את Excel ונסה שוב")
+    except Exception as e:
+        wb.close()
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise IOError(f"שגיאה בביטול: {e}") from e
+    wb.close()
+    _cat_cache.pop(sheet_name, None)
+    _save_last_action(None)
+    return float(amount) if isinstance(amount, (int, float)) else 0.0
 
 
 def set_budget(row_idx, amount, sheet_name=None):
@@ -306,6 +374,15 @@ def add_expense(row_idx, amount, sheet_name=None):
     # Invalidate cache so next read reflects the new entry
     _cat_cache.pop(sheet_name, None)
 
+    # Save for undo
+    _save_last_action({
+        "type": "expense",
+        "row": row_idx,
+        "col": next_col,
+        "amount": float(amount),
+        "sheet_name": sheet_name,
+    })
+
     # Copy updated local file back to Desktop (slow, but caller runs this in background)
     if DESKTOP_PATH:
         try:
@@ -313,4 +390,4 @@ def add_expense(row_idx, amount, sheet_name=None):
         except Exception as e:
             logging.warning("Desktop sync failed: %s", e)
 
-    return {"budget": budget, "actual": actual, "remaining": remaining}
+    return {"budget": budget, "actual": actual, "remaining": remaining, "col": next_col}
