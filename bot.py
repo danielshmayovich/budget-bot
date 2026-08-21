@@ -224,22 +224,40 @@ def make_pay_keyboard(row, amount):
     ])
 
 
-def make_budget_cat_keyboard(cats, page=0):
+def make_budget_cat_keyboard(cats, page=0, month_num=None):
     sorted_cats = sorted(cats, key=lambda x: x["name"])
     chunk = sorted_cats[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
+    m = month_num if month_num is not None else ""
     rows = []
     for c in chunk:
         budget = c.get("budget", 0)
         bstr   = f"{fmt(budget)}₪" if budget > 0 else "ללא יעד"
         label  = f"{c['name'][:18]} [{bstr}]"
-        rows.append([InlineKeyboardButton(label[:32], callback_data=f"setbud:{c['row']}")])
+        rows.append([InlineKeyboardButton(label[:32], callback_data=f"setbud:{c['row']}:{m}")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("◀️ הקודם", callback_data=f"budpage:{page - 1}"))
+        nav.append(InlineKeyboardButton("◀️ הקודם", callback_data=f"budpage:{page - 1}:{m}"))
     if (page + 1) * PAGE_SIZE < len(sorted_cats):
-        nav.append(InlineKeyboardButton("הבא ▶️",   callback_data=f"budpage:{page + 1}"))
+        nav.append(InlineKeyboardButton("הבא ▶️",   callback_data=f"budpage:{page + 1}:{m}"))
     if nav:
         rows.append(nav)
+    rows.append([InlineKeyboardButton("❌ ביטול", callback_data="cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def make_budget_view_month_keyboard():
+    current_month = datetime.now().month
+    months = excel_handler.MONTH_SHEETS
+    rows, row_btns = [], []
+    for num in range(1, 13):
+        label = months[num].strip()
+        if num == current_month:
+            label = f"• {label} •"
+        row_btns.append(InlineKeyboardButton(label, callback_data=f"budviewmonth:{num}"))
+        if len(row_btns) == 3:
+            rows.append(row_btns); row_btns = []
+    if row_btns:
+        rows.append(row_btns)
     rows.append([InlineKeyboardButton("❌ ביטול", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
 
@@ -544,22 +562,12 @@ async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show category list to update monthly budget targets."""
-    try:
-        cats = excel_handler.get_categories()
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ שגיאה בקריאת קטגוריות: {e}")
-        return
-
-    with_budget    = sum(1 for c in cats if c.get("budget", 0) > 0)
-    without_budget = len(cats) - with_budget
-    header = (
-        f"💰 *עדכון יעד תקציב*\n"
-        f"קטגוריות עם יעד: {with_budget}  |  ללא יעד: {without_budget}\n\n"
-        f"בחר קטגוריה לעדכון:"
+    """Ask which month's budget targets to view/update."""
+    kb = make_budget_view_month_keyboard()
+    await update.message.reply_text(
+        "💰 *יעדי תקציב*\n\nבחר חודש לצפייה ועדכון:",
+        reply_markup=kb, parse_mode="Markdown"
     )
-    kb = make_budget_cat_keyboard(cats, page=0)
-    await update.message.reply_text(header, reply_markup=kb, parse_mode="Markdown")
 
 
 async def cmd_resetmonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -579,7 +587,7 @@ async def cmd_resetmonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🗑️ *איפוס חודש*\n\n"
         "בחר את החודש שרוצה לאפס:\n"
-        "_(יעדי התקציב יישמרו — רק ההוצאות ימחקו)_",
+        "_(בשלב הבא תבחר מה בדיוק לאפס — יעד, ביצוע, או הכל)_",
         reply_markup=InlineKeyboardMarkup(rows),
         parse_mode="Markdown",
     )
@@ -1090,10 +1098,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.warning("Forward to %s failed: %s", other_id, e)
 
-    elif data.startswith("setbud:"):
-        row = int(data.split(":")[1])
+    elif data.startswith("budviewmonth:"):
+        month_num  = int(data.split(":")[1])
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
         try:
-            cats = excel_handler.get_categories()
+            cats = excel_handler.get_categories(sheet_name)
+        except Exception as e:
+            await query.edit_message_text(f"⚠️ שגיאה בקריאת קטגוריות: {e}")
+            return
+        with_budget    = sum(1 for c in cats if c.get("budget", 0) > 0)
+        without_budget = len(cats) - with_budget
+        header = (
+            f"💰 *יעדי תקציב — {sheet_name.strip()}*\n"
+            f"קטגוריות עם יעד: {with_budget}  |  ללא יעד: {without_budget}\n\n"
+            f"בחר קטגוריה לעדכון:"
+        )
+        kb = make_budget_cat_keyboard(cats, page=0, month_num=month_num)
+        await query.edit_message_text(header, reply_markup=kb, parse_mode="Markdown")
+
+    elif data.startswith("setbud:"):
+        parts     = data.split(":")
+        row       = int(parts[1])
+        month_num = int(parts[2]) if len(parts) > 2 and parts[2] else None
+        sheet_name = excel_handler.MONTH_SHEETS[month_num] if month_num else None
+        try:
+            cats = excel_handler.get_categories(sheet_name)
         except Exception as e:
             await query.edit_message_text(f"⚠️ {e}")
             return
@@ -1101,9 +1130,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name   = cat["name"] if cat else f"שורה {row}"
         budget = cat.get("budget", 0) if cat else 0
         context.user_data["pending_budget"] = {"row": row, "name": name}
+        month_label = f" ({sheet_name.strip()})" if sheet_name else ""
         current_str = f"\nיעד נוכחי: *{fmt(budget)} ₪*" if budget > 0 else "\nעדיין לא הוגדר יעד"
         await query.edit_message_text(
-            f"💰 *{name}*{current_str}\n\nשלח את הסכום החדש (₪):",
+            f"💰 *{name}*{month_label}{current_str}\n\nשלח את הסכום החדש (₪):",
             parse_mode="Markdown"
         )
 
@@ -1111,33 +1141,64 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         month_num  = int(data.split(":")[1])
         sheet_name = excel_handler.MONTH_SHEETS[month_num]
         await query.edit_message_text(
+            f"🗑️ *איפוס חודש {sheet_name.strip()}*\n\nמה לאפס?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 ביצוע (הוצאות) בלבד", callback_data=f"resetwhat:{month_num}:actual")],
+                [InlineKeyboardButton("🎯 יעד (תקציב) בלבד",     callback_data=f"resetwhat:{month_num}:budget")],
+                [InlineKeyboardButton("🗑️ הכל (יעד + ביצוע)",    callback_data=f"resetwhat:{month_num}:both")],
+                [InlineKeyboardButton("❌ ביטול", callback_data="cancel")],
+            ]),
+            parse_mode="Markdown",
+        )
+
+    elif data.startswith("resetwhat:"):
+        parts      = data.split(":")
+        month_num  = int(parts[1])
+        mode       = parts[2]
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        desc = {
+            "actual": "• כל ההוצאות שנרשמו יימחקו\n• יעדי התקציב (עמודה D) יישמרו",
+            "budget": "• יעדי התקציב (עמודה D) יימחקו\n• ההוצאות שנרשמו יישמרו",
+            "both":   "• כל ההוצאות וגם יעדי התקציב יימחקו",
+        }[mode]
+        await query.edit_message_text(
             f"⚠️ *אתה עומד לאפס את חודש {sheet_name.strip()}*\n\n"
-            f"• כל ההוצאות שנרשמו יימחקו\n"
-            f"• יעדי התקציב (עמודה D) יישמרו\n"
+            f"{desc}\n"
             f"• *אין דרך חזרה!*\n\n"
             f"בטוח שרוצה להמשיך?",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑️ כן, אפס את החודש", callback_data=f"confirmreset:{month_num}")],
+                [InlineKeyboardButton("🗑️ כן, אפס", callback_data=f"confirmreset:{month_num}:{mode}")],
                 [InlineKeyboardButton("❌ ביטול", callback_data="cancel")],
             ]),
             parse_mode="Markdown",
         )
 
     elif data.startswith("confirmreset:"):
-        month_num  = int(data.split(":")[1])
+        parts      = data.split(":")
+        month_num  = int(parts[1])
+        mode       = parts[2] if len(parts) > 2 else "actual"
         sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        clear_actual = mode in ("actual", "both")
+        clear_budget = mode in ("budget", "both")
         await query.edit_message_text(f"⏳ מאפס את חודש {sheet_name.strip()}...")
         loop = asyncio.get_event_loop()
         try:
-            cleared = await loop.run_in_executor(None, excel_handler.reset_month, sheet_name)
+            cleared = await loop.run_in_executor(
+                None, excel_handler.reset_month, sheet_name, clear_actual, clear_budget
+            )
         except Exception as exc:
             logging.error("reset_month failed: %s", exc)
             await query.edit_message_text(f"⚠️ שגיאה באיפוס: {exc}")
             return
+        saved_note = {
+            "actual": "יעדי התקציב נשמרו",
+            "budget": "ההוצאות נשמרו",
+            "both":   "הכל אופס",
+        }[mode]
         await query.edit_message_text(
             f"✅ *חודש {sheet_name.strip()} אופס*\n\n"
             f"נמחקו {cleared} ערכים\n"
-            f"יעדי התקציב נשמרו",
+            f"{saved_note}",
             parse_mode="Markdown",
         )
 
@@ -1230,13 +1291,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logging.warning("Forward undo notif to %s failed: %s", other_id, e)
 
     elif data.startswith("budpage:"):
-        page = int(data.split(":")[1])
+        parts     = data.split(":")
+        page      = int(parts[1])
+        month_num = int(parts[2]) if len(parts) > 2 and parts[2] else None
+        sheet_name = excel_handler.MONTH_SHEETS[month_num] if month_num else None
         try:
-            cats = excel_handler.get_categories()
+            cats = excel_handler.get_categories(sheet_name)
         except Exception as e:
             await query.edit_message_text(f"⚠️ {e}")
             return
-        kb = make_budget_cat_keyboard(cats, page=page)
+        kb = make_budget_cat_keyboard(cats, page=page, month_num=month_num)
         await query.edit_message_reply_markup(kb)
 
     elif data.startswith("budmonth:"):
