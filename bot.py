@@ -684,12 +684,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error("set_budget failed: %s", exc)
             await update.message.reply_text(f"⚠️ שגיאה בשמירת תקציב: {exc}")
             return
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✏️ עדכן שוב את {pb['name'][:20]}", callback_data=f"setbud:{pb['row']}:{month_num}")],
+            [InlineKeyboardButton(f"📋 קטגוריה אחרת ({sheet_name.strip()})", callback_data=f"budviewmonth:{month_num}")],
+        ])
         await update.message.reply_text(
             f"✅ *תקציב עודכן*\n"
             f"קטגוריה: *{pb['name']}*\n"
             f"חודש: {sheet_name.strip()}\n"
             f"יעד חדש: *{fmt(amount)} ₪*",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=kb,
         )
         return
 
