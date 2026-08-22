@@ -663,16 +663,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Budget update flow: waiting for amount after user picked a category
     if context.user_data.get("pending_budget"):
         nums = re.findall(r"\d+(?:\.\d+)?", text)
-        if nums:
-            amount = float(nums[0])
-            pb = context.user_data["pending_budget"]
+        if not nums:
+            await update.message.reply_text("נא לשלוח סכום (מספר בלבד, לדוגמה: 4000)")
+            return
+        amount = float(nums[0])
+        pb = context.user_data.pop("pending_budget")
+        month_num = pb.get("month_num")
+        if month_num is None:
             kb = make_budget_month_keyboard(pb["row"], amount)
             await update.message.reply_text(
                 f"💰 *{pb['name']}* — *{fmt(amount)} ₪*\nבחר חודש לעדכון:",
                 reply_markup=kb, parse_mode="Markdown"
             )
-        else:
-            await update.message.reply_text("נא לשלוח סכום (מספר בלבד, לדוגמה: 4000)")
+            return
+        sheet_name = excel_handler.MONTH_SHEETS[month_num]
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, excel_handler.set_budget, pb["row"], amount, sheet_name)
+        except Exception as exc:
+            logging.error("set_budget failed: %s", exc)
+            await update.message.reply_text(f"⚠️ שגיאה בשמירת תקציב: {exc}")
+            return
+        await update.message.reply_text(
+            f"✅ *תקציב עודכן*\n"
+            f"קטגוריה: *{pb['name']}*\n"
+            f"חודש: {sheet_name.strip()}\n"
+            f"יעד חדש: *{fmt(amount)} ₪*",
+            parse_mode="Markdown"
+        )
         return
 
     numbers = re.findall(r"\d+(?:\.\d+)?", text)
@@ -1129,7 +1147,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat = next((c for c in cats if c["row"] == row), None)
         name   = cat["name"] if cat else f"שורה {row}"
         budget = cat.get("budget", 0) if cat else 0
-        context.user_data["pending_budget"] = {"row": row, "name": name}
+        context.user_data["pending_budget"] = {"row": row, "name": name, "month_num": month_num}
         month_label = f" ({sheet_name.strip()})" if sheet_name else ""
         current_str = f"\nיעד נוכחי: *{fmt(budget)} ₪*" if budget > 0 else "\nעדיין לא הוגדר יעד"
         await query.edit_message_text(
