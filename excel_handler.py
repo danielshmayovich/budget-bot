@@ -211,6 +211,33 @@ def _wb_save_safe(wb, path):
     wb.save(path)
 
 
+def get_monthly_summary():
+    """Return expense totals for every month that has any data (for trend chart)."""
+    wb = _load_wb(write=False)
+    try:
+        idx = wb["I N D E X "]
+        result = []
+        for month_num, sheet_name in MONTH_SHEETS.items():
+            if sheet_name not in wb.sheetnames:
+                continue
+            ws = wb[sheet_name]
+            expenses = _build_row_list(ws, idx, EXPENSE_START_ROW, EXPENSE_END_ROW)
+            active = [c for c in expenses if c["actual"] > 0]
+            total_exp = sum(c["actual"] for c in active)
+            total_bud = sum(c["budget"] for c in active if c.get("budget", 0) > 0)
+            if total_exp > 0 or total_bud > 0:
+                result.append({
+                    "month_num": month_num,
+                    "month_name": sheet_name.strip(),
+                    "total_exp": total_exp,
+                    "total_budget": total_bud,
+                    "categories": active,
+                })
+    finally:
+        wb.close()
+    return result
+
+
 def reset_month(sheet_name=None, clear_actual=True, clear_budget=False):
     """Clear expense/income entries (columns E-AI) and/or budget targets (column D)."""
     if not sheet_name:

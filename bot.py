@@ -362,6 +362,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "שלום! אני בוט ניהול התקציב המשפחתי \U0001f4b0\n\n"
         "פקודות:\n"
         "• /status - דוח מצב חודשי\n"
+        "• /trend - גרף מגמה שנתי עם חריגות\n"
         "• /dashboard - ויזואליזציה + ניתוח חריגות\n"
         "• /budget - עדכון יעדי תקציב לפי קטגוריה\n"
         "• /undo - בטל את ההוצאה/העברה האחרונה\n"
@@ -1364,6 +1365,55 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(kb)
 
 
+async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a trend chart image: monthly totals + top YTD categories."""
+    await update.message.reply_text("⏳ מייצר דוח מגמה...")
+    loop = asyncio.get_event_loop()
+    try:
+        monthly_data = await loop.run_in_executor(None, excel_handler.get_monthly_summary)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ שגיאה בקריאת נתונים: {e}")
+        return
+
+    if not monthly_data:
+        await update.message.reply_text("אין נתונים לדוח מגמה")
+        return
+
+    try:
+        import trend_chart
+        png_bytes = await loop.run_in_executor(None, trend_chart.generate, monthly_data)
+    except Exception as e:
+        logging.error("trend_chart.generate failed: %s", e, exc_info=True)
+        await update.message.reply_text(f"⚠️ שגיאה ביצירת גרף: {e}")
+        return
+
+    months_with_data = len(monthly_data)
+    total_ytd = sum(m["total_exp"] for m in monthly_data)
+    budget_ytd = sum(m["total_budget"] for m in monthly_data)
+    overrun_months = sum(1 for m in monthly_data if m["total_exp"] > m["total_budget"] > 0)
+
+    caption_lines = [f"📊 *דוח מגמה* — {months_with_data} חודשים"]
+    if budget_ytd > 0:
+        pct = int(total_ytd / budget_ytd * 100)
+        caption_lines.append(
+            f"סה\"כ YTD: *{fmt(total_ytd)} ₪*  /  תקציב: *{fmt(budget_ytd)} ₪*  ({pct}%)"
+        )
+        if overrun_months > 0:
+            caption_lines.append(f"🔴 חריגה ב-{overrun_months} חודשים")
+        else:
+            caption_lines.append("🟢 ללא חריגות")
+    else:
+        caption_lines.append(f"סה\"כ YTD: *{fmt(total_ytd)} ₪*")
+
+    import io
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=io.BytesIO(png_bytes),
+        caption="\n".join(caption_lines),
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the last recorded action and offer to undo it."""
     action = excel_handler.load_last_action()
@@ -1420,6 +1470,7 @@ def main():
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("status",     cmd_status))
     app.add_handler(CommandHandler("dashboard",  cmd_dashboard))
+    app.add_handler(CommandHandler("trend",      cmd_trend))
     app.add_handler(CommandHandler("budget",     cmd_budget))
     app.add_handler(CommandHandler("export",     cmd_export))
     app.add_handler(CommandHandler("backup",     cmd_backup))
