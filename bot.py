@@ -594,6 +594,29 @@ async def cmd_resetmonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_who(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all registered users (those who did /start)."""
+    data = _load_chat_ids_data()
+    ids   = data.get("ids", [])
+    names = data.get("names", {})
+    if not ids:
+        await update.message.reply_text(
+            "❌ אף משתמש לא רשום עדיין!\n\n"
+            "שניכם צריכים לשלוח /start לבוט כדי להירשם ולקבל התראות."
+        )
+        return
+    lines = [f"👥 *משתמשים רשומים ({len(ids)}):*\n"]
+    for cid in ids:
+        name = names.get(str(cid), "(ללא שם)")
+        me   = " ← אתה" if cid == update.effective_chat.id else ""
+        lines.append(f"  • {name} (ID: `{cid}`){me}")
+    if len(ids) == 1:
+        lines.append("\n⚠️ רק אדם אחד רשום — הצד השני צריך לשלוח /start!")
+    else:
+        lines.append("\n✅ שניכם רשומים — התראות יעבדו")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Diagnose Excel file: list sheet names and check expected sheets exist."""
     import traceback
@@ -1476,6 +1499,7 @@ def main():
     app.add_handler(CommandHandler("backup",     cmd_backup))
     app.add_handler(CommandHandler("resetmonth", cmd_resetmonth))
     app.add_handler(CommandHandler("undo",       cmd_undo))
+    app.add_handler(CommandHandler("who",        cmd_who))
     app.add_handler(CommandHandler("debug",      cmd_debug))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), cmd_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
