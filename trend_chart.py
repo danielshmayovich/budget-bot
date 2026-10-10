@@ -87,7 +87,7 @@ def generate(monthly_data: list) -> bytes:
     ax_monthly = fig.add_subplot(gs[0])
     ax_cats    = fig.add_subplot(gs[1])
 
-    fig.suptitle("דוח מגמה — תקציב משפחתי", fontsize=13, fontweight="bold",
+    fig.suptitle(_h("דוח מגמה — תקציב משפחתי"), fontsize=13, fontweight="bold",
                  color=CLR_TEXT, x=0.97, ha="right")
 
     _draw_monthly(ax_monthly, monthly_data)
@@ -153,14 +153,14 @@ def _draw_monthly(ax, monthly_data):
     ax.set_xlim(-0.6, len(months) - 0.4)
     ax.set_ylim(0, max(totals + [1]) * 1.18)
 
-    _style_axes(ax, "הוצאות חודשיות (₪)")
+    _style_axes(ax, _h("הוצאות חודשיות (₪)"))
 
     # Legend
     patches = [
-        mpatches.Patch(color=CLR_GREEN,  label="בתוך תקציב"),
-        mpatches.Patch(color=CLR_AMBER,  label="קרוב לגבול (75%+)"),
-        mpatches.Patch(color=CLR_RED,    label="חריגה"),
-        mpatches.Patch(color=CLR_BUDGET, label="יעד תקציב"),
+        mpatches.Patch(color=CLR_GREEN,  label=_h("בתוך תקציב")),
+        mpatches.Patch(color=CLR_AMBER,  label=_h("קרוב לגבול (75%+)")),
+        mpatches.Patch(color=CLR_RED,    label=_h("חריגה")),
+        mpatches.Patch(color=CLR_BUDGET, label=_h("יעד תקציב")),
     ]
     ax.legend(handles=patches, fontsize=7, loc="upper left",
               framealpha=0, labelcolor=CLR_MUTED, handlelength=1.2)
@@ -168,12 +168,12 @@ def _draw_monthly(ax, monthly_data):
 
 def _draw_categories(ax, top_cats):
     if not top_cats:
-        ax.text(0.5, 0.5, "אין נתוני קטגוריה", ha="center", va="center",
+        ax.text(0.5, 0.5, _h("אין נתוני קטגוריה"), ha="center", va="center",
                 color=CLR_MUTED, transform=ax.transAxes)
-        _style_axes(ax, "קטגוריות מובילות — YTD")
+        _style_axes(ax, _h("קטגוריות מובילות — YTD"))
         return
 
-    names   = [n[:22] for n, _ in reversed(top_cats)]
+    names   = [_h(n[:22]) for n, _ in reversed(top_cats)]
     actuals = [v["actual"]  for _, v in reversed(top_cats)]
     budgets = [v["budget"]  for _, v in reversed(top_cats)]
     colors  = [_status_color(a, b) for a, b in zip(actuals, budgets)]
@@ -207,7 +207,7 @@ def _draw_categories(ax, top_cats):
     ax.set_xlim(0, max_val * 1.30)
     ax.set_ylim(-0.6, len(names) - 0.4)
 
-    _style_axes(ax, "קטגוריות מובילות — YTD (סה\"כ שנתי)")
+    _style_axes(ax, _h('קטגוריות מובילות — YTD (סה"כ שנתי)'))
 
     patches = [
         mpatches.Patch(color=CLR_BUDGET, label="יעד תקציב"),
@@ -349,7 +349,7 @@ def _draw_category_bars(ax, slices, colors, total):
 
 def _empty_chart() -> bytes:
     fig, ax = plt.subplots(figsize=(8, 4), dpi=120, facecolor=CLR_BG)
-    ax.text(0.5, 0.5, "אין נתונים זמינים לדוח מגמה",
+    ax.text(0.5, 0.5, _h("אין נתונים זמינים לדוח מגמה"),
             ha="center", va="center", fontsize=14, color=CLR_MUTED,
             transform=ax.transAxes)
     ax.set_axis_off()
