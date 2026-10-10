@@ -341,6 +341,49 @@ def undo_expense(row_idx, col, sheet_name=None):
     return float(amount) if isinstance(amount, (int, float)) else 0.0
 
 
+def _recurring_path():
+    ep = os.getenv("EXCEL_PATH", "")
+    base = os.path.dirname(ep) if ep else os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "recurring.json")
+
+
+def load_recurring() -> list:
+    try:
+        path = _recurring_path()
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def save_recurring(items: list):
+    try:
+        with open(_recurring_path(), "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.warning("Failed to save recurring: %s", e)
+
+
+def apply_recurring(sheet_name=None):
+    """Add all recurring payments to sheet. Returns list of result dicts."""
+    if not sheet_name:
+        sheet_name = current_sheet()
+    items = load_recurring()
+    results = []
+    for item in items:
+        row    = item.get("row")
+        amount = item.get("amount", 0)
+        name   = item.get("name", "?")
+        try:
+            res = add_expense(row, amount, sheet_name)
+            results.append({"name": name, "amount": amount, "ok": True, "result": res})
+        except Exception as e:
+            results.append({"name": name, "amount": amount, "ok": False, "error": str(e)})
+    return results
+
+
 def set_budget(row_idx, amount, sheet_name=None):
     if not sheet_name:
         sheet_name = current_sheet()

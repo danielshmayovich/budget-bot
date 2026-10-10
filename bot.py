@@ -363,8 +363,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "פקודות:\n"
         "• /status - דוח מצב חודשי\n"
         "• /trend - גרף מגמה שנתי עם חריגות\n"
+        "• /pie - עוגת התפלגות הוצאות + איפה לחסוך\n"
         "• /dashboard - ויזואליזציה + ניתוח חריגות\n"
         "• /budget - עדכון יעדי תקציב לפי קטגוריה\n"
+        "• /recurring - תשלומים קבועים (משכנתא, מנויים...)\n"
+        "• /applyrecurring - הוסף כל התשלומים הקבועים לחודש\n"
         "• /undo - בטל את ההוצאה/העברה האחרונה\n"
         "• /export - הורד קובץ האקסל\n\n"
         "הוספת הוצאה:\n"
@@ -1337,6 +1340,96 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.warning("Forward undo notif to %s failed: %s", other_id, e)
 
+    elif data.startswith("addrec:"):
+        # addrec:row:amount — user picked a category for recurring
+        parts  = data.split(":")
+        row    = int(parts[1])
+        amount = float(parts[2])
+        try:
+            cats = excel_handler.get_categories()
+            cat  = next((c for c in cats if c["row"] == row), None)
+            name = cat["name"] if cat else f"שורה {row}"
+        except Exception:
+            name = f"שורה {row}"
+        context.user_data["pending_recurring"] = {"row": row, "name": name, "amount": amount}
+        await query.edit_message_text(
+            f"🔄 להוסיף כתשלום קבוע חודשי?\n\n*{name}* — *{fmt(amount)} ₪*",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ כן, הוסף", callback_data="confirmaddrec")],
+                [InlineKeyboardButton("❌ ביטול",     callback_data="cancel")],
+            ]),
+            parse_mode="Markdown",
+        )
+
+    elif data == "confirmaddrec":
+        pr = context.user_data.pop("pending_recurring", None)
+        if not pr:
+            await query.edit_message_text("⚠️ אין נתונים ממתינים")
+            return
+        items = excel_handler.load_recurring()
+        if any(i["row"] == pr["row"] for i in items):
+            await query.edit_message_text(
+                f"⚠️ *{pr['name']}* כבר קיים ברשימה", parse_mode="Markdown"
+            )
+            return
+        items.append({"row": pr["row"], "name": pr["name"], "amount": pr["amount"]})
+        excel_handler.save_recurring(items)
+        await query.edit_message_text(
+            f"✅ *{pr['name']}* — *{fmt(pr['amount'])} ₪* נוסף לתשלומים הקבועים\n"
+            f"סה\"כ {len(items)} תשלומים קבועים",
+            parse_mode="Markdown",
+        )
+
+    elif data.startswith("delrec:"):
+        idx   = int(data.split(":")[1])
+        items = excel_handler.load_recurring()
+        if idx < 0 or idx >= len(items):
+            await query.edit_message_text("⚠️ פריט לא נמצא")
+            return
+        removed = items.pop(idx)
+        excel_handler.save_recurring(items)
+        await query.edit_message_text(
+            f"🗑️ *{removed['name']}* — {fmt(removed['amount'])} ₪ הוסר מהתשלומים הקבועים\n"
+            f"נותרו {len(items)} תשלומים",
+            parse_mode="Markdown",
+        )
+
+    elif data == "applyallrec":
+        items = excel_handler.load_recurring()
+        if not items:
+            await query.edit_message_text("אין תשלומים קבועים")
+            return
+        sender_id = query.message.chat_id
+        sheet = excel_handler.current_sheet()
+        await query.edit_message_text(f"⏳ מוסיף {len(items)} תשלומים...")
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, excel_handler.apply_recurring, sheet)
+        ok   = [r for r in results if r["ok"]]
+        fail = [r for r in results if not r["ok"]]
+        lines = [f"✅ *הוחלו {len(ok)}/{len(results)} תשלומים קבועים לחודש {sheet.strip()}:*\n"]
+        for r in ok:
+            lines.append(f"  ✓ *{r['name']}* — {fmt(r['amount'])} ₪")
+        if fail:
+            lines.append("\n⚠️ *שגיאות:*")
+            for r in fail:
+                lines.append(f"  ✗ {r['name']}: {r.get('error', '?')}")
+        total_ok = sum(r["amount"] for r in ok)
+        lines.append(f"\n💸 *סה\"כ נוסף: {fmt(total_ok)} ₪*")
+        await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+
+        if ok:
+            sender_name = get_user_name(sender_id) or "בן/בת זוג"
+            notif = (
+                f"🔄 *{sender_name}* החיל/ה {len(ok)} תשלומים קבועים"
+                f" לחודש {sheet.strip()} — סה\"כ *{fmt(total_ok)} ₪*"
+            )
+            for other_id in load_all_chat_ids():
+                if other_id != sender_id:
+                    try:
+                        await context.bot.send_message(chat_id=other_id, text=notif, parse_mode="Markdown")
+                    except Exception as e:
+                        logging.warning("Forward recurring notif to %s failed: %s", other_id, e)
+
     elif data.startswith("budpage:"):
         parts     = data.split(":")
         page      = int(parts[1])
@@ -1386,6 +1479,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         kb = make_cat_keyboard(cats, float(parts[2]), page=int(parts[1]))
         await query.edit_message_reply_markup(kb)
+
+
+async def cmd_pie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a pie chart: category distribution + budget utilization for current month."""
+    await update.message.reply_text("⏳ מייצר תרשים התפלגות...")
+    loop = asyncio.get_event_loop()
+    try:
+        expenses, _income, month = await loop.run_in_executor(None, excel_handler.get_status)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ שגיאה בקריאת נתונים: {e}")
+        return
+
+    active = [c for c in expenses if c["actual"] > 0]
+    if not active:
+        await update.message.reply_text("אין נתוני הוצאות לחודש הנוכחי")
+        return
+
+    try:
+        import trend_chart
+        png_bytes = await loop.run_in_executor(None, trend_chart.generate_pie, active, month)
+    except Exception as e:
+        logging.error("generate_pie failed: %s", e, exc_info=True)
+        await update.message.reply_text(f"⚠️ שגיאה ביצירת גרף: {e}")
+        return
+
+    total_exp  = sum(c["actual"] for c in active)
+    total_bud  = sum(c.get("budget", 0) for c in active if c.get("budget", 0) > 0)
+    overrun    = [c for c in active if c.get("budget", 0) > 0 and c["actual"] > c["budget"]]
+    caption    = [f"🥧 *התפלגות הוצאות — {month}*", f"סה\"כ: *{fmt(total_exp)} ₪*"]
+    if total_bud > 0:
+        caption.append(f"ניצול תקציב: *{int(total_exp / total_bud * 100)}%*")
+    if overrun:
+        caption.append(f"🔴 {len(overrun)} קטגוריות חריגות")
+    import io as _io
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=_io.BytesIO(png_bytes),
+        caption="\n".join(caption),
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1464,6 +1597,109 @@ async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List recurring payments with delete buttons."""
+    items = excel_handler.load_recurring()
+    if not items:
+        await update.message.reply_text(
+            "אין תשלומים קבועים מוגדרים.\n\n"
+            "הוסף עם: /addrecurring <קטגוריה> <סכום>\n"
+            "לדוגמה: `/addrecurring דלק 150`",
+            parse_mode="Markdown",
+        )
+        return
+    total  = sum(i["amount"] for i in items)
+    sheet  = excel_handler.current_sheet().strip()
+    lines  = [f"🔄 *תשלומים קבועים — {len(items)} פריטים ({fmt(total)} ₪/חודש):*\n"]
+    kb_rows = []
+    for i, item in enumerate(items):
+        lines.append(f"  {i+1}. *{item['name']}* — {fmt(item['amount'])} ₪")
+        kb_rows.append([InlineKeyboardButton(
+            f"❌ מחק: {item['name'][:20]}", callback_data=f"delrec:{i}"
+        )])
+    kb_rows.append([InlineKeyboardButton(
+        f"✅ החל הכל לחודש {sheet}", callback_data="applyallrec"
+    )])
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_addrecurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a recurring payment: /addrecurring <category> <amount>"""
+    args = context.args or []
+    nums  = [a for a in args if re.match(r"^\d+(?:\.\d+)?$", a)]
+    words = [a for a in args if not re.match(r"^\d+(?:\.\d+)?$", a)]
+
+    if not nums or not words:
+        await update.message.reply_text(
+            "שלח: `/addrecurring שם_קטגוריה סכום`\n"
+            "לדוגמה: `/addrecurring דלק 150`",
+            parse_mode="Markdown",
+        )
+        return
+
+    amount    = float(nums[0])
+    cat_query = " ".join(words)
+    try:
+        cats = excel_handler.get_categories()
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ {e}")
+        return
+
+    matches = excel_handler.find_categories_multi(cat_query, cats)
+    if not matches:
+        await update.message.reply_text(f"❌ לא נמצאה קטגוריה עבור '{cat_query}'")
+        return
+
+    if len(matches) == 1:
+        _, cat = matches[0]
+        context.user_data["pending_recurring"] = {"row": cat["row"], "name": cat["name"], "amount": amount}
+        await update.message.reply_text(
+            f"🔄 להוסיף כתשלום קבוע חודשי?\n\n*{cat['name']}* — *{fmt(amount)} ₪*",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ כן, הוסף", callback_data="confirmaddrec")],
+                [InlineKeyboardButton("❌ ביטול",     callback_data="cancel")],
+            ]),
+            parse_mode="Markdown",
+        )
+    else:
+        btns = [
+            [InlineKeyboardButton(cat["name"][:30], callback_data=f"addrec:{cat['row']}:{amount}")]
+            for _, cat in matches[:5]
+        ]
+        btns.append([InlineKeyboardButton("❌ ביטול", callback_data="cancel")])
+        await update.message.reply_text(
+            f"נמצאו כמה קטגוריות — בחר:",
+            reply_markup=InlineKeyboardMarkup(btns),
+            parse_mode="Markdown",
+        )
+
+
+async def cmd_applyrecurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Apply all recurring payments to the current month."""
+    items = excel_handler.load_recurring()
+    if not items:
+        await update.message.reply_text("אין תשלומים קבועים מוגדרים.\nהוסף עם /addrecurring")
+        return
+    total = sum(i["amount"] for i in items)
+    sheet = excel_handler.current_sheet().strip()
+    lines = [f"🔄 *להחיל {len(items)} תשלומים קבועים לחודש {sheet}?*\n"]
+    for item in items:
+        lines.append(f"  • *{item['name']}* — {fmt(item['amount'])} ₪")
+    lines.append(f"\n*סה\"כ: {fmt(total)} ₪*")
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ החל הכל", callback_data="applyallrec")],
+            [InlineKeyboardButton("❌ ביטול",   callback_data="cancel")],
+        ]),
+        parse_mode="Markdown",
+    )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error("Exception in handler: %s", context.error, exc_info=context.error)
 
@@ -1493,8 +1729,12 @@ def main():
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("status",     cmd_status))
     app.add_handler(CommandHandler("dashboard",  cmd_dashboard))
-    app.add_handler(CommandHandler("trend",      cmd_trend))
-    app.add_handler(CommandHandler("budget",     cmd_budget))
+    app.add_handler(CommandHandler("trend",          cmd_trend))
+    app.add_handler(CommandHandler("pie",            cmd_pie))
+    app.add_handler(CommandHandler("recurring",      cmd_recurring))
+    app.add_handler(CommandHandler("addrecurring",   cmd_addrecurring))
+    app.add_handler(CommandHandler("applyrecurring", cmd_applyrecurring))
+    app.add_handler(CommandHandler("budget",         cmd_budget))
     app.add_handler(CommandHandler("export",     cmd_export))
     app.add_handler(CommandHandler("backup",     cmd_backup))
     app.add_handler(CommandHandler("resetmonth", cmd_resetmonth))
