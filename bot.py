@@ -687,6 +687,28 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
+    # Recurring payment flow: waiting for amount after user picked a category
+    if context.user_data.get("pending_recurring_cat"):
+        nums = re.findall(r"\d+(?:\.\d+)?", text)
+        if not nums:
+            await update.message.reply_text("נא לשלוח סכום חודשי (מספר בלבד, לדוגמה: 150)")
+            return
+        amount = float(nums[0])
+        pr = context.user_data.pop("pending_recurring_cat")
+        items = excel_handler.load_recurring()
+        if any(i["row"] == pr["row"] for i in items):
+            await update.message.reply_text(f"⚠️ *{pr['name']}* כבר קיים ברשימת התשלומים הקבועים", parse_mode="Markdown")
+            return
+        items.append({"row": pr["row"], "name": pr["name"], "amount": amount})
+        excel_handler.save_recurring(items)
+        await update.message.reply_text(
+            f"✅ *{pr['name']}* — *{fmt(amount)} ₪/חודש* נוסף לתשלומים הקבועים\n"
+            f"סה\"כ {len(items)} תשלומים קבועים\n\n"
+            f"השתמש ב-/applyrecurring להחלתם על החודש הנוכחי",
+            parse_mode="Markdown",
+        )
+        return
+
     # Budget update flow: waiting for amount after user picked a category
     if context.user_data.get("pending_budget"):
         nums = re.findall(r"\d+(?:\.\d+)?", text)
@@ -1340,6 +1362,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.warning("Forward undo notif to %s failed: %s", other_id, e)
 
+    elif data.startswith("reccat:"):
+        # User picked a category from recurring keyboard → ask for amount
+        parts = data.split(":")
+        row   = int(parts[1])
+        try:
+            cats = excel_handler.get_categories()
+            cat  = next((c for c in cats if c["row"] == row), None)
+            name = cat["name"] if cat else f"שורה {row}"
+        except Exception:
+            name = f"שורה {row}"
+        context.user_data["pending_recurring_cat"] = {"row": row, "name": name}
+        await query.edit_message_text(
+            f"🔄 *{name}*\n\nכמה ₪ לחודש? (שלח מספר)",
+            parse_mode="Markdown",
+        )
+
+    elif data.startswith("recpage:"):
+        page = int(data.split(":")[1])
+        try:
+            cats = excel_handler.get_categories()
+        except Exception as e:
+            await query.edit_message_text(f"⚠️ {e}")
+            return
+        kb = _make_recurring_cat_keyboard(cats, page=page)
+        await query.edit_message_reply_markup(kb)
+
     elif data.startswith("addrec:"):
         # addrec:row:amount — user picked a category for recurring
         parts  = data.split(":")
@@ -1627,29 +1675,63 @@ async def cmd_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _make_recurring_cat_keyboard(cats, page=0):
+    """Category keyboard for recurring payment selection (same layout as expense keyboard)."""
+    sorted_cats = sorted(cats, key=lambda x: x["name"])
+    chunk = sorted_cats[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
+    rows = []
+    pair = []
+    for c in chunk:
+        pair.append(InlineKeyboardButton(c["name"][:22], callback_data=f"reccat:{c['row']}:{page}"))
+        if len(pair) == 2:
+            rows.append(pair); pair = []
+    if pair:
+        rows.append(pair)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ הקודם", callback_data=f"recpage:{page-1}"))
+    if (page + 1) * PAGE_SIZE < len(sorted_cats):
+        nav.append(InlineKeyboardButton("הבא ▶️",   callback_data=f"recpage:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("❌ ביטול", callback_data="cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def cmd_addrecurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add a recurring payment: /addrecurring <category> <amount>"""
-    args = context.args or []
+    """Add a recurring payment — interactive keyboard flow or /addrecurring <category> <amount>."""
+    args  = context.args or []
     nums  = [a for a in args if re.match(r"^\d+(?:\.\d+)?$", a)]
     words = [a for a in args if not re.match(r"^\d+(?:\.\d+)?$", a)]
 
-    if not nums or not words:
-        await update.message.reply_text(
-            "שלח: `/addrecurring שם_קטגוריה סכום`\n"
-            "לדוגמה: `/addrecurring דלק 150`",
-            parse_mode="Markdown",
-        )
-        return
-
-    amount    = float(nums[0])
-    cat_query = " ".join(words)
     try:
         cats = excel_handler.get_categories()
     except Exception as e:
         await update.message.reply_text(f"⚠️ {e}")
         return
 
-    matches = excel_handler.find_categories_multi(cat_query, cats)
+    # No args → interactive keyboard
+    if not args:
+        kb = _make_recurring_cat_keyboard(cats)
+        await update.message.reply_text(
+            "🔄 *תשלום קבוע חדש*\n\nבחר קטגוריה:",
+            reply_markup=kb, parse_mode="Markdown",
+        )
+        return
+
+    # Args provided but missing category or amount → inline shortcut
+    if not nums or not words:
+        await update.message.reply_text(
+            "שלח: `/addrecurring שם_קטגוריה סכום`\n"
+            "לדוגמה: `/addrecurring דלק 150`\n\n"
+            "או /addrecurring בלי args לבחירה מהרשימה",
+            parse_mode="Markdown",
+        )
+        return
+
+    amount    = float(nums[0])
+    cat_query = " ".join(words)
+    matches   = excel_handler.find_categories_multi(cat_query, cats)
     if not matches:
         await update.message.reply_text(f"❌ לא נמצאה קטגוריה עבור '{cat_query}'")
         return
@@ -1672,7 +1754,7 @@ async def cmd_addrecurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         btns.append([InlineKeyboardButton("❌ ביטול", callback_data="cancel")])
         await update.message.reply_text(
-            f"נמצאו כמה קטגוריות — בחר:",
+            "נמצאו כמה קטגוריות — בחר:",
             reply_markup=InlineKeyboardMarkup(btns),
             parse_mode="Markdown",
         )
