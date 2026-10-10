@@ -8,6 +8,14 @@ Two panels:
 import io
 from collections import defaultdict
 
+try:
+    from bidi.algorithm import get_display as _bidi
+    def _h(text: str) -> str:
+        return _bidi(text)
+except ImportError:
+    def _h(text: str) -> str:
+        return text
+
 import matplotlib
 matplotlib.use("Agg")  # non-interactive, no display required
 import matplotlib.pyplot as plt
@@ -208,24 +216,37 @@ def _draw_categories(ax, top_cats):
               framealpha=0, labelcolor=CLR_MUTED, handlelength=1.2)
 
 
-# ── Pie chart colours (categorical) ──────────────────────────────────────────
-PIE_COLORS = [
-    "#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6",
-    "#06b6d4", "#f97316", "#ec4899", "#14b8a6", "#6366f1",
-    "#84cc16", "#e11d48",
+# ── Dark-theme palette for pie / donut chart ──────────────────────────────────
+_D_BG    = "#0f172a"   # page background
+_D_SURF  = "#1e293b"   # card / bar track
+_D_TEXT  = "#f1f5f9"   # primary labels
+_D_MUTED = "#94a3b8"   # secondary labels
+_D_SEP   = "#334155"   # dividers
+
+_DONUT_COLORS = [
+    "#60a5fa",  # blue-400
+    "#34d399",  # emerald-400
+    "#fbbf24",  # amber-400
+    "#f87171",  # red-400
+    "#a78bfa",  # violet-400
+    "#38bdf8",  # sky-400
+    "#fb923c",  # orange-400
+    "#e879f9",  # fuchsia-400
+    "#4ade80",  # green-400
+    "#facc15",  # yellow-400
+    "#64748b",  # slate (for "other")
 ]
 
 
 def generate_pie(categories: list, month_name: str = "") -> bytes:
-    """Return PNG bytes: category pie + budget-utilisation 'where to save' bars."""
+    """Dark-themed donut + ranked category bars."""
     active = sorted([c for c in categories if c["actual"] > 0], key=lambda x: -x["actual"])
     if not active:
         return _empty_chart()
 
-    TOP_N   = 9
-    top     = active[:TOP_N]
-    rest    = active[TOP_N:]
-    slices  = list(top)
+    top  = active[:10]
+    rest = active[10:]
+    slices = list(top)
     if rest:
         slices.append({
             "name": f"אחר ({len(rest)})",
@@ -233,107 +254,97 @@ def generate_pie(categories: list, month_name: str = "") -> bytes:
             "budget": 0,
         })
 
-    labels  = [c["name"][:22] for c in slices]
-    values  = [c["actual"]    for c in slices]
-    colors  = PIE_COLORS[:len(slices)]
+    values = [c["actual"] for c in slices]
+    colors = _DONUT_COLORS[:len(slices)]
+    total  = sum(values)
 
-    budgeted = sorted(
-        [c for c in active if c.get("budget", 0) > 0],
-        key=lambda x: -(x["actual"] / x["budget"]),
-    )[:10]
-
-    fig = plt.figure(figsize=(13, 7), dpi=120, facecolor=CLR_BG)
+    fig = plt.figure(figsize=(13, 7), dpi=125, facecolor=_D_BG)
     gs  = fig.add_gridspec(
-        1, 2, width_ratios=[1.3, 1], wspace=0.30,
-        left=0.02, right=0.97, top=0.90, bottom=0.04,
+        1, 2, width_ratios=[1.0, 1.25], wspace=0.06,
+        left=0.01, right=0.99, top=0.91, bottom=0.04,
     )
-    ax_pie = fig.add_subplot(gs[0])
-    ax_bud = fig.add_subplot(gs[1])
+    ax_d = fig.add_subplot(gs[0])
+    ax_r = fig.add_subplot(gs[1])
 
-    title = f"התפלגות הוצאות — {month_name}" if month_name else "התפלגות הוצאות"
-    fig.suptitle(title, fontsize=13, fontweight="bold", color=CLR_TEXT, x=0.5, ha="center")
+    month_lbl = f" — {month_name}" if month_name else ""
+    fig.suptitle(_h(f"התפלגות הוצאות{month_lbl}"),
+                 fontsize=14, fontweight="bold", color=_D_TEXT,
+                 x=0.5, ha="center", y=0.97)
 
-    _draw_pie_panel(ax_pie, labels, values, colors)
-    _draw_budget_utilization(ax_bud, budgeted)
+    _draw_donut(ax_d, values, colors, total)
+    _draw_category_bars(ax_r, slices, colors, total)
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, facecolor=CLR_BG, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=125, facecolor=_D_BG, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
 
-def _draw_pie_panel(ax, labels, values, colors):
-    total = sum(values) or 1
-
-    def _autopct(pct):
-        return f"{pct:.1f}%" if pct >= 4 else ""
-
-    wedges, _texts, autotexts = ax.pie(
+def _draw_donut(ax, values, colors, total):
+    wedges, _ = ax.pie(
         values,
-        labels=None,
         colors=colors,
-        autopct=_autopct,
-        pctdistance=0.78,
         startangle=90,
-        wedgeprops={"linewidth": 1.5, "edgecolor": CLR_BG},
+        counterclock=False,
+        wedgeprops={"width": 0.42, "edgecolor": _D_BG, "linewidth": 3},
+        radius=1,
     )
-    for at in autotexts:
-        at.set_fontsize(7)
-        at.set_color(CLR_BG)
-        at.set_fontweight("bold")
+    wedges[0].set_radius(1.07)   # highlight largest slice
 
-    legend_labels = [f"{lbl}: {_fmt(v)} ₪  ({v/total*100:.1f}%)" for lbl, v in zip(labels, values)]
-    ax.legend(
-        wedges, legend_labels,
-        loc="lower center",
-        bbox_to_anchor=(0.5, -0.20),
-        fontsize=7.5,
-        framealpha=0,
-        labelcolor=CLR_TEXT,
-        ncol=2,
-    )
-    ax.text(0, 0, f"סה\"כ\n{_fmt(total)} ₪",
-            ha="center", va="center", fontsize=9, fontweight="bold", color=CLR_TEXT)
-    ax.set_title("התפלגות קטגוריות", fontsize=10, fontweight="bold", color=CLR_TEXT, pad=8)
+    # Centre annotation
+    total_str = f"{int(total/1000):,}k" if total >= 10_000 else f"{int(total):,}"
+    ax.text(0,  0.14, _h("סה\"כ"), ha="center", va="center", fontsize=10, color=_D_MUTED)
+    ax.text(0, -0.12, f"{total_str} ₪",
+            ha="center", va="center", fontsize=20, color=_D_TEXT, fontweight="bold")
+
+    ax.set_facecolor(_D_BG)
+    ax.set_aspect("equal")
 
 
-def _draw_budget_utilization(ax, budgeted):
-    if not budgeted:
-        ax.text(0.5, 0.5, "אין תקציבים מוגדרים",
-                ha="center", va="center", color=CLR_MUTED,
-                transform=ax.transAxes, fontsize=10)
-        ax.set_axis_off()
-        return
+def _draw_category_bars(ax, slices, colors, total):
+    ax.set_facecolor(_D_BG)
+    n    = len(slices)
+    ypos = np.arange(n - 1, -1, -1, dtype=float)  # top→bottom
+    max_pct = max(c["actual"] / total for c in slices) or 1
 
-    names   = [c["name"][:22] for c in reversed(budgeted)]
-    actuals = [c["actual"]    for c in reversed(budgeted)]
-    budgets = [c["budget"]    for c in reversed(budgeted)]
-    pcts    = [a / b for a, b in zip(actuals, budgets)]
-    colors  = [_status_color(a, b) for a, b in zip(actuals, budgets)]
-    y       = np.arange(len(names))
+    for c, clr, yi in zip(slices, colors, ypos):
+        pct   = c["actual"] / total
+        bar_w = pct / max_pct          # normalised 0–1
 
-    ax.barh(y, [min(p, 1.35) for p in pcts], height=0.6, color=colors, zorder=3, linewidth=0)
-    ax.axvline(x=1.0, color=CLR_RED, linewidth=1.5, zorder=4, linestyle="--", alpha=0.6)
+        # Track (dim background bar)
+        ax.barh(yi, 1.0, height=0.38, color=_D_SURF, left=0, zorder=1, linewidth=0)
+        # Coloured fill
+        ax.barh(yi, bar_w, height=0.38, color=clr, alpha=0.90, left=0, zorder=2, linewidth=0)
 
-    for yi, (a, b, p) in enumerate(zip(actuals, budgets, pcts)):
-        rem = b - a
-        pct_int = int(p * 100)
-        if rem < 0:
-            label = f"{_fmt(a)}/{_fmt(b)} (+{_fmt(-rem)} חריגה)"
+        # Category name — left of bar
+        ax.text(-0.03, yi + 0.22, _h(c["name"][:24]),
+                va="bottom", ha="left", fontsize=8.5, color=_D_TEXT, fontweight="bold",
+                transform=ax.get_yaxis_transform())
+
+        # Amount + % — right of bar
+        bud = c.get("budget", 0)
+        if bud > 0:
+            used_pct = int(c["actual"] / bud * 100)
+            over = c["actual"] - bud
+            if over > 0:
+                status_str = f"  [+{_fmt(over)} {_h('חריגה')}]"
+            elif used_pct >= 75:
+                status_str = f"  [{used_pct}% {_h('מתקציב')}]"
+            else:
+                status_str = f"  [{used_pct}%]"
         else:
-            label = f"{_fmt(a)}/{_fmt(b)} ({pct_int}%)"
-        ax.text(min(p, 1.35) + 0.02, yi, label,
-                va="center", ha="left", fontsize=7, color=CLR_TEXT)
+            status_str = ""
+        label = f"{pct*100:.1f}%   {int(c['actual']):,} ₪{status_str}"
+        ax.text(bar_w + 0.02, yi, label,
+                va="center", ha="left", fontsize=7.5, color=_D_MUTED)
 
-    ax.set_yticks(y)
-    ax.set_yticklabels(names, fontsize=8, color=CLR_TEXT)
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{int(v*100)}%"))
-    ax.set_xlim(0, 1.85)
-    ax.set_ylim(-0.6, len(names) - 0.4)
-    ax.set_xlabel("ניצול תקציב", fontsize=8, color=CLR_MUTED)
-
-    _style_axes(ax, "איפה לחסוך — ניצול תקציב")
+    ax.set_xlim(-0.01, 2.20)
+    ax.set_ylim(-0.65, n - 0.35)
+    ax.set_yticks([])
+    ax.set_xticks([])
+    ax.spines[["top", "right", "left", "bottom"]].set_visible(False)
+    ax.set_facecolor(_D_BG)
 
 
 def _empty_chart() -> bytes:
