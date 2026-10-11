@@ -9,12 +9,19 @@ import io
 from collections import defaultdict
 
 try:
-    from bidi.algorithm import get_display as _bidi
+    from bidi.algorithm import get_display as _bidi_display
     def _h(text: str) -> str:
-        return _bidi(text)
+        return _bidi_display(text, base_dir='R')
 except ImportError:
+    import re as _re
     def _h(text: str) -> str:
-        return text
+        # Pure-Python visual-order converter for matplotlib LTR renderer.
+        # Splits into Hebrew runs (U+0590-U+05FF) and non-Hebrew segments,
+        # reverses each Hebrew run, then reverses segment order to model RTL.
+        parts = _re.split(r'([֐-׿]+)', text)
+        result = [p[::-1] if p and '֐' <= p[0] <= '׿' else p
+                  for p in parts]
+        return ''.join(reversed(result))
 
 import matplotlib
 matplotlib.use("Agg")  # non-interactive, no display required
@@ -148,7 +155,7 @@ def _draw_monthly(ax, monthly_data):
             )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(months, fontsize=8, color=CLR_MUTED)
+    ax.set_xticklabels([_h(m) for m in months], fontsize=8, color=CLR_MUTED)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt(v)))
     ax.set_xlim(-0.6, len(months) - 0.4)
     ax.set_ylim(0, max(totals + [1]) * 1.18)
@@ -201,10 +208,13 @@ def _draw_categories(ax, top_cats):
                 va="center", ha="left", fontsize=7.5,
                 color=CLR_TEXT, fontweight="bold")
 
-    ax.set_yticks(y)
-    ax.set_yticklabels(names, fontsize=8.5, color=CLR_TEXT)
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt(v)))
-    ax.set_xlim(0, max_val * 1.30)
+    # Draw category labels manually to avoid matplotlib RTL axis detection
+    ax.set_yticks([])
+    for yi, name in zip(y, names):
+        ax.text(-max_val * 0.01, yi, name, va="center", ha="right",
+                fontsize=8.5, color=CLR_TEXT)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt(v) if v >= 0 else ""))
+    ax.set_xlim(-max_val * 0.32, max_val * 1.30)
     ax.set_ylim(-0.6, len(names) - 0.4)
 
     _style_axes(ax, _h('קטגוריות מובילות — YTD (סה"כ שנתי)'))
