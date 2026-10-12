@@ -684,6 +684,74 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def _handle_multiline(update: Update, context: ContextTypes.DEFAULT_TYPE, lines: list):
+    """Process multiple 'category amount' lines in one message as a batch."""
+    loop = asyncio.get_event_loop()
+    try:
+        cats = excel_handler.get_categories()
+        sheet_name = excel_handler.current_sheet()
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ שגיאה: {e}")
+        return
+
+    results = []
+    successes = []
+    sender_id = update.effective_chat.id
+    sender_name = get_user_name(sender_id) or "בן/בת זוג"
+
+    for line in lines:
+        nums = re.findall(r"\d+(?:\.\d+)?", line)
+        if not nums:
+            results.append(f"⚠️ '{line[:20]}': אין מספר")
+            continue
+        amount = float(nums[0])
+        cat_query = re.sub(r"\d+(?:\.\d+)?", "", line)
+        cat_query = re.sub(r"\b(שקל|שקלים|ש\"ח|שח|₪|על|ב|ל)\b", "", cat_query).strip()
+        if not cat_query:
+            results.append(f"⚠️ {fmt(amount)} ₪: לא זוהתה קטגוריה")
+            continue
+
+        matches = excel_handler.find_categories_multi(cat_query, cats)
+        if not matches:
+            results.append(f"⚠️ '{cat_query}': קטגוריה לא נמצאה")
+            continue
+        if len(matches) > 1 and matches[0][0] < 75:
+            names = " / ".join(c["name"] for _, c in matches[:3])
+            results.append(f"⚠️ '{cat_query}': לא ברור — {names}?")
+            continue
+
+        _, cat = matches[0]
+        try:
+            result = await loop.run_in_executor(
+                None, excel_handler.add_expense, cat["row"], amount, sheet_name
+            )
+            remaining = result.get("remaining", 0)
+            budget    = result.get("budget", 0)
+            over = f" ⚠️ חריגה {fmt(abs(remaining))} ₪" if budget > 0 and remaining < 0 else ""
+            results.append(f"✅ *{cat['name']}* — {fmt(amount)} ₪{over}")
+            successes.append({"name": cat["name"], "amount": amount})
+        except Exception as exc:
+            results.append(f"⚠️ *{cat['name']}*: {exc}")
+
+    await update.message.reply_text(
+        f"*הוספת {len(successes)} הוצאות ({sheet_name.strip()}):*\n" + "\n".join(results),
+        parse_mode="Markdown",
+    )
+
+    if successes:
+        notif_lines = "\n".join(f"  • {s['name']}: {fmt(s['amount'])} ₪" for s in successes)
+        notif = (
+            f"📢 *{sender_name}* הוסיף/ה {len(successes)} הוצאות ({sheet_name.strip()}):\n"
+            f"{notif_lines}"
+        )
+        for other_id in load_all_chat_ids():
+            if other_id != sender_id:
+                try:
+                    await context.bot.send_message(chat_id=other_id, text=notif, parse_mode="Markdown")
+                except Exception as e:
+                    logging.warning("Batch notification to %s failed: %s", other_id, e)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
@@ -745,6 +813,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=kb,
         )
+        return
+
+    # Multi-line batch: each line must contain at least one digit
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) > 1 and all(re.search(r"\d", l) for l in lines):
+        await _handle_multiline(update, context, lines)
         return
 
     numbers = re.findall(r"\d+(?:\.\d+)?", text)

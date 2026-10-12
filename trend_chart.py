@@ -10,9 +10,11 @@ from collections import defaultdict
 
 try:
     from bidi.algorithm import get_display as _bidi_display
+    import logging as _log; _log.info("trend_chart: python-bidi loaded")
     def _h(text: str) -> str:
         return _bidi_display(text, base_dir='R')
 except ImportError:
+    import logging as _log; _log.warning("trend_chart: python-bidi missing, using pure-Python fallback")
     import re as _re
     def _h(text: str) -> str:
         # Pure-Python visual-order converter for matplotlib LTR renderer.
