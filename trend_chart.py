@@ -279,7 +279,7 @@ def generate_pie(categories: list, month_name: str = "") -> bytes:
     ax_r = fig.add_subplot(gs[1])
 
     month_lbl = f" — {month_name}" if month_name else ""
-    fig.suptitle(_h(f"התפלגות הוצאות{month_lbl}"),
+    fig.suptitle("‎" + _h(f"התפלגות הוצאות{month_lbl}"),
                  fontsize=14, fontweight="bold", color=_D_TEXT,
                  x=0.5, ha="center", y=0.97)
 
@@ -306,7 +306,7 @@ def _draw_donut(ax, values, colors, total):
 
     # Centre annotation
     total_str = f"{int(total/1000):,}k" if total >= 10_000 else f"{int(total):,}"
-    ax.text(0,  0.14, _h("סה\"כ"), ha="center", va="center", fontsize=10, color=_D_MUTED)
+    ax.text(0,  0.14, "‎" + _h("סה\"כ"), ha="center", va="center", fontsize=10, color=_D_MUTED)
     ax.text(0, -0.12, f"{total_str} ₪",
             ha="center", va="center", fontsize=20, color=_D_TEXT, fontweight="bold")
 
@@ -330,24 +330,25 @@ def _draw_category_bars(ax, slices, colors, total):
         ax.barh(yi, bar_w, height=0.38, color=clr, alpha=0.90, left=0, zorder=2, linewidth=0)
 
         # Category name — left of bar
-        ax.text(-0.03, yi + 0.22, _h(c["name"][:24]),
+        ax.text(-0.03, yi + 0.22, "‎" + _h(c["name"][:24]),
                 va="bottom", ha="left", fontsize=8.5, color=_D_TEXT, fontweight="bold",
                 transform=ax.get_yaxis_transform())
 
-        # Amount + % — right of bar
+        # Amount + % — right of bar (NO Hebrew here: avoids matplotlib RTL mis-detection)
         bud = c.get("budget", 0)
         if bud > 0:
             used_pct = int(c["actual"] / bud * 100)
             over = c["actual"] - bud
             if over > 0:
-                status_str = f"  [+{_fmt(over)} {_h('חריגה')}]"
+                status_str = f"  [!+{_fmt(over)}]"
             elif used_pct >= 75:
-                status_str = f"  [{used_pct}% {_h('מתקציב')}]"
+                status_str = f"  [{used_pct}%~]"
             else:
                 status_str = f"  [{used_pct}%]"
         else:
             status_str = ""
-        label = f"{pct*100:.1f}%   {int(c['actual']):,} ₪{status_str}"
+        # ‎ (LRM) forces LTR paragraph — prevents matplotlib RTL on numbers
+        label = f"‎{pct*100:.1f}%   {int(c['actual']):,} ₪{status_str}"
         ax.text(bar_w + 0.02, yi, label,
                 va="center", ha="left", fontsize=7.5, color=_D_MUTED)
 
